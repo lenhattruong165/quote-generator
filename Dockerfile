@@ -1,7 +1,8 @@
 FROM python:3.11-slim
 
-# Cài Noto fonts (tiếng Việt, CJK, emoji) + curl
+# Cài fontconfig trước (cung cấp fc-cache), sau đó fonts + curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    fontconfig \
     fonts-noto \
     fonts-noto-cjk \
     fonts-noto-color-emoji \
