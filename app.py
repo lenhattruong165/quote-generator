@@ -1,39 +1,37 @@
 """
-Quote Image Generator API v2
+Quote Image Generator API v3
 Chang'e Aspirant Bot — by vy-lucyfer
 
-Fixes v2:
-  - Avatar zone rộng hơn (58% width thay 42%)
-  - Fade muộn hơn (chỉ 22% cuối) — giống voids.top
-  - Hard-wrap text không có space (aaaa...)
-  - Dùng "-" thay "—"
-  - Font name size tỉ lệ hợp lý hơn
+Fix v3:
+  - Avatar vuông Discord scale full height
+  - Fade ngang + vignette góc (trên/dưới tối nhẹ)
+  - Hard-wrap text không có space
+  - "-" thay "—"
 """
 
 import io
 import os
-import textwrap
 import urllib.request
 from flask import Flask, request, send_file, jsonify
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageChops
 
 app = Flask(__name__)
 
-IMG_W       = 1200
-IMG_H       = 630
-AVATAR_ZONE = int(IMG_W * 0.58)   # 696px — avatar rộng hơn
-TEXT_X      = int(IMG_W * 0.62)   # 744px — text bắt đầu
-TEXT_W      = IMG_W - TEXT_X - 50 # ~406px
-TEXT_PAD_X  = 20
+IMG_W = 1200
+IMG_H = 630
+AVATAR_MAX_W = int(IMG_W * 0.62)  # 744px — avatar tối đa
+TEXT_X   = int(IMG_W * 0.54)      # 648px — text bắt đầu
+TEXT_W   = IMG_W - TEXT_X - 40
+TEXT_PAD = 15
 
-FONT_MAX = 62
-FONT_MIN = 18
+FONT_MAX  = 62
+FONT_MIN  = 18
 FONT_STEP = 2
 
 COLOR_BG       = (0,   0,   0,   255)
 COLOR_TEXT     = (255, 255, 255, 255)
 COLOR_NAME     = (230, 230, 230, 255)
-COLOR_USERNAME = (120, 120, 120, 255)
+COLOR_USERNAME = (110, 110, 110, 255)
 
 FONT_PATHS = [
     "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
@@ -69,40 +67,61 @@ def fetch_avatar(url: str):
         print(f"[avatar] {e}")
         return None
 
-def make_fade_mask(width: int, height: int, fade_start: float = 0.78):
-    """Trắng từ trái, fade nhanh chỉ ở 22% cuối — giống voids.top."""
+def make_fade_mask(width: int, height: int, fade_start: float = 0.70) -> Image.Image:
+    """Mask ngang: trắng trái → đen phải, fade từ fade_start."""
     mask = Image.new("L", (width, height), 255)
     draw = ImageDraw.Draw(mask)
     fade_px  = int(width * fade_start)
     fade_len = max(1, width - fade_px)
     for x in range(fade_px, width):
-        progress = (x - fade_px) / fade_len
-        alpha    = int(255 * max(0.0, (1.0 - progress) ** 1.8))
+        p     = (x - fade_px) / fade_len
+        alpha = int(255 * max(0.0, (1.0 - p) ** 2.2))
         draw.line([(x, 0), (x, height)], fill=alpha)
     return mask
 
+def make_top_bottom_vignette(width: int, height: int) -> Image.Image:
+    """Vignette tối nhẹ ở top và bottom (không ảnh hưởng giữa)."""
+    mask = Image.new("L", (width, height), 255)
+    draw = ImageDraw.Draw(mask)
+    vig_h = int(height * 0.28)
+    # Top
+    for y in range(vig_h):
+        p     = 1.0 - (y / vig_h)
+        alpha = int(255 * (1.0 - p * 0.5))
+        draw.line([(0, y), (width, y)], fill=alpha)
+    # Bottom
+    for y in range(vig_h):
+        py    = height - 1 - y
+        p     = 1.0 - (y / vig_h)
+        alpha = int(255 * (1.0 - p * 0.4))
+        draw.line([(0, py), (width, py)], fill=alpha)
+    return mask
+
+def combine_masks(mask_a: Image.Image, mask_b: Image.Image) -> Image.Image:
+    """Nhân 2 mask L lại: kết quả = a * b / 255."""
+    return ImageChops.multiply(mask_a, mask_b)
+
 def smart_wrap(text: str, font, max_w: int, dummy) -> list:
-    """Wrap có hỗ trợ hard-cut text không có space."""
     words = text.split()
     if not words:
         return [text]
-
     lines   = []
     current = ""
-
     for word in words:
-        # Hard-cut word quá dài
         while True:
             b = dummy.textbbox((0, 0), word, font=font)
             if b[2] - b[0] <= max_w:
                 break
+            cut_found = False
             for cut in range(len(word) - 1, 0, -1):
                 b2 = dummy.textbbox((0, 0), word[:cut], font=font)
                 if b2[2] - b2[0] <= max_w:
                     lines.append(word[:cut])
                     word = word[cut:]
+                    cut_found = True
                     break
-
+            if not cut_found:
+                break
         test = (current + " " + word).strip() if current else word
         b    = dummy.textbbox((0, 0), test, font=font)
         if b[2] - b[0] <= max_w:
@@ -111,7 +130,6 @@ def smart_wrap(text: str, font, max_w: int, dummy) -> list:
             if current:
                 lines.append(current)
             current = word
-
     if current:
         lines.append(current)
     return lines or [text]
@@ -119,11 +137,14 @@ def smart_wrap(text: str, font, max_w: int, dummy) -> list:
 def fit_text(text: str, max_w: int, max_h: int):
     dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     for size in range(FONT_MAX, FONT_MIN - 1, -FONT_STEP):
-        font    = find_font(FONT_PATHS, size)
-        lines   = smart_wrap(text, font, max_w, dummy)
-        line_h  = int(size * 1.38)
+        font   = find_font(FONT_PATHS, size)
+        lines  = smart_wrap(text, font, max_w, dummy)
+        line_h = int(size * 1.38)
         total_h = line_h * len(lines)
-        max_lw  = max((dummy.textbbox((0,0), l, font=font)[2] - dummy.textbbox((0,0), l, font=font)[0]) for l in lines)
+        max_lw  = 0
+        for l in lines:
+            b = dummy.textbbox((0, 0), l, font=font)
+            max_lw = max(max_lw, b[2] - b[0])
         if total_h <= max_h and max_lw <= max_w:
             return font, lines, line_h, size
     font  = find_font(FONT_PATHS, FONT_MIN)
@@ -133,33 +154,42 @@ def fit_text(text: str, max_w: int, max_h: int):
 def render_quote(text: str, display_name: str, username: str, avatar_url: str) -> bytes:
     canvas = Image.new("RGBA", (IMG_W, IMG_H), COLOR_BG)
 
-    # Avatar
+    # ── Avatar ────────────────────────────────────────────────────────────────
     av = fetch_avatar(avatar_url)
     if av:
         aw, ah = av.size
+        # Scale full height
         scale  = IMG_H / ah
         new_aw = int(aw * scale)
         av = av.resize((new_aw, IMG_H), Image.LANCZOS)
-        crop_w = min(new_aw, AVATAR_ZONE + 80)
-        av = av.crop((0, 0, crop_w, IMG_H))
-        av.putalpha(make_fade_mask(crop_w, IMG_H, 0.78))
-        canvas.paste(av, (0, 0), av)
 
-    # Text
+        # Crop về AVATAR_MAX_W
+        paste_w = min(new_aw, AVATAR_MAX_W)
+        av_crop = av.crop((0, 0, paste_w, IMG_H)).convert("RGBA")
+
+        # Tạo mask = fade_ngang × vignette_top_bottom
+        fade_mask = make_fade_mask(paste_w, IMG_H, fade_start=0.70)
+        vig_mask  = make_top_bottom_vignette(paste_w, IMG_H)
+        final_mask = combine_masks(fade_mask, vig_mask)
+
+        av_crop.putalpha(final_mask)
+        canvas.paste(av_crop, (0, 0), av_crop)
+
+    # ── Text ──────────────────────────────────────────────────────────────────
     font, lines, line_h, fs = fit_text(text, TEXT_W, int(IMG_H * 0.62))
 
     name_size = max(FONT_MIN, int(fs * 0.58))
-    user_size = max(14, int(fs * 0.44))
+    user_size = max(14,       int(fs * 0.44))
     name_font = find_font(FONT_ITALIC_PATHS, name_size)
-    user_font = find_font(FONT_PATHS, user_size)
+    user_font = find_font(FONT_PATHS,        user_size)
 
     dummy     = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     name_text = f"- {display_name}"
     user_text = f"@{username}"
 
-    nb = dummy.textbbox((0, 0), name_text, font=name_font)
+    nb     = dummy.textbbox((0, 0), name_text, font=name_font)
     name_h = nb[3] - nb[1]
-    ub = dummy.textbbox((0, 0), user_text, font=user_font)
+    ub     = dummy.textbbox((0, 0), user_text, font=user_font)
     user_h = ub[3] - ub[1]
 
     gap      = int(fs * 0.55)
@@ -168,24 +198,26 @@ def render_quote(text: str, display_name: str, username: str, avatar_url: str) -
     start_y  = (IMG_H - total_h) // 2
 
     draw = ImageDraw.Draw(canvas)
-    y = start_y
+    y    = start_y
 
     for line in lines:
         b  = dummy.textbbox((0, 0), line, font=font)
         lw = b[2] - b[0]
-        x  = TEXT_X + TEXT_PAD_X + (TEXT_W - lw) // 2
+        x  = TEXT_X + TEXT_PAD + (TEXT_W - lw) // 2
         draw.text((x, y), line, font=font, fill=COLOR_TEXT)
         y += line_h
 
     y += gap
     nb2    = dummy.textbbox((0, 0), name_text, font=name_font)
     name_w = nb2[2] - nb2[0]
-    draw.text((TEXT_X + TEXT_PAD_X + (TEXT_W - name_w) // 2, y), name_text, font=name_font, fill=COLOR_NAME)
+    draw.text((TEXT_X + TEXT_PAD + (TEXT_W - name_w) // 2, y),
+              name_text, font=name_font, fill=COLOR_NAME)
     y += name_h + name_gap
 
     ub2    = dummy.textbbox((0, 0), user_text, font=user_font)
     user_w = ub2[2] - ub2[0]
-    draw.text((TEXT_X + TEXT_PAD_X + (TEXT_W - user_w) // 2, y), user_text, font=user_font, fill=COLOR_USERNAME)
+    draw.text((TEXT_X + TEXT_PAD + (TEXT_W - user_w) // 2, y),
+              user_text, font=user_font, fill=COLOR_USERNAME)
 
     out = canvas.convert("RGB")
     buf = io.BytesIO()
@@ -195,7 +227,7 @@ def render_quote(text: str, display_name: str, username: str, avatar_url: str) -
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "2"})
+    return jsonify({"status": "ok", "version": "3"})
 
 @app.route("/quote", methods=["POST"])
 def quote():
