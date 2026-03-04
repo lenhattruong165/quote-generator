@@ -18,7 +18,7 @@ const { getLang } = require('../db');
 // ── Config ────────────────────────────────────────────────────────────────────
 // Đổi URL này sau khi deploy HF Space
 // Ví dụ: https://vy-lucyfer-quote-generator.hf.space
-const HF_API_URL  = process.env.QUOTE_API_URL || 'https://vy-lucyfer-quote-generator.hf.space';
+const HF_API_URL  = process.env.QUOTE_API_URL || 'https://lenhattruong165-quote-generator.hf.space';
 const ENDPOINT    = `${HF_API_URL}/quote`;
 const TIMEOUT_S   = 30;  // HF Space cold start có thể chậm
 const COOLDOWN_MS = 5_000;
