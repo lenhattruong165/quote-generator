@@ -14,13 +14,6 @@ from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 
-@app.route('/health')
-def health():
-    return {"status": "ok"}
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=7860)
-
 IMG_W = 1200
 IMG_H = 630
 AVATAR_MAX_W = int(IMG_W * 0.60)  # 720px — avatar tối đa
@@ -237,5 +230,9 @@ def quote():
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+@app.route('/health')
+def health():
+    return {"status": "ok"}
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 7860)), debug=False)
+    app.run(host="0.0.0.0", port=7860)
