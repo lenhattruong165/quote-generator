@@ -230,9 +230,15 @@ def quote():
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-@app.route('/health')
-def health():
-    return {"status": "ok"}
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=7860)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 7860)), debug=False)
+    
+@app.route("/", methods=["GET"])
+def index():
+    # Trang chủ để khi click vào link Space không bị 404
+    return "Bot is running 24/7!", 200
+
+@app.route("/health", methods=["GET"])
+def health():
+    # Endpoint này dành riêng cho Cronjob ping
+    return {"status": "alive"}, 200
