@@ -1,27 +1,24 @@
 """
-Quote Image Generator API v3
+Quote Image Generator API v4
 Chang'e Aspirant Bot — by vy-lucyfer
 
-Fix v3:
-  - Avatar vuông Discord scale full height
-  - Fade ngang + vignette góc (trên/dưới tối nhẹ)
-  - Hard-wrap text không có space
-  - "-" thay "—"
+Fix v4: Fade NGANG THUẦN — linear gradient X, đều từ trên xuống dưới.
+Không vignette, không top/bottom effect. Giống "Make it a Quote" chuẩn.
 """
 
 import io
 import os
 import urllib.request
 from flask import Flask, request, send_file, jsonify
-from PIL import Image, ImageDraw, ImageFont, ImageChops
+from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 
 IMG_W = 1200
 IMG_H = 630
-AVATAR_MAX_W = int(IMG_W * 0.62)  # 744px — avatar tối đa
-TEXT_X   = int(IMG_W * 0.54)      # 648px — text bắt đầu
-TEXT_W   = IMG_W - TEXT_X - 40
+AVATAR_MAX_W = int(IMG_W * 0.60)  # 720px — avatar tối đa
+TEXT_X   = int(IMG_W * 0.52)      # 624px — text bắt đầu (overlap nhẹ với avatar)
+TEXT_W   = IMG_W - TEXT_X - 40    # ~536px
 TEXT_PAD = 15
 
 FONT_MAX  = 62
@@ -67,41 +64,27 @@ def fetch_avatar(url: str):
         print(f"[avatar] {e}")
         return None
 
-def make_fade_mask(width: int, height: int, fade_start: float = 0.70) -> Image.Image:
-    """Mask ngang: trắng trái → đen phải, fade từ fade_start."""
+def make_horizontal_fade(width: int, height: int, fade_start: float = 0.65) -> Image.Image:
+    """
+    Mask NGANG THUẦN:
+    - Từ x=0 đến x=fade_start*width: alpha=255 (hiện ảnh)
+    - Từ fade_start đến cuối: fade tuyến tính → 0 (đen)
+    - Mỗi cột X có cùng alpha từ trên xuống dưới (đường thẳng đứng đều)
+    """
     mask = Image.new("L", (width, height), 255)
     draw = ImageDraw.Draw(mask)
     fade_px  = int(width * fade_start)
     fade_len = max(1, width - fade_px)
     for x in range(fade_px, width):
         p     = (x - fade_px) / fade_len
-        alpha = int(255 * max(0.0, (1.0 - p) ** 2.2))
+        # Curve nhẹ để fade mượt nhưng vẫn ngang đều
+        alpha = int(255 * max(0.0, (1.0 - p) ** 1.5))
+        # Vẽ cột dọc toàn bộ height với cùng alpha
         draw.line([(x, 0), (x, height)], fill=alpha)
     return mask
 
-def make_top_bottom_vignette(width: int, height: int) -> Image.Image:
-    """Vignette tối nhẹ ở top và bottom (không ảnh hưởng giữa)."""
-    mask = Image.new("L", (width, height), 255)
-    draw = ImageDraw.Draw(mask)
-    vig_h = int(height * 0.28)
-    # Top
-    for y in range(vig_h):
-        p     = 1.0 - (y / vig_h)
-        alpha = int(255 * (1.0 - p * 0.5))
-        draw.line([(0, y), (width, y)], fill=alpha)
-    # Bottom
-    for y in range(vig_h):
-        py    = height - 1 - y
-        p     = 1.0 - (y / vig_h)
-        alpha = int(255 * (1.0 - p * 0.4))
-        draw.line([(0, py), (width, py)], fill=alpha)
-    return mask
-
-def combine_masks(mask_a: Image.Image, mask_b: Image.Image) -> Image.Image:
-    """Nhân 2 mask L lại: kết quả = a * b / 255."""
-    return ImageChops.multiply(mask_a, mask_b)
-
 def smart_wrap(text: str, font, max_w: int, dummy) -> list:
+    """Wrap với hard-cut cho text không có space."""
     words = text.split()
     if not words:
         return [text]
@@ -158,7 +141,7 @@ def render_quote(text: str, display_name: str, username: str, avatar_url: str) -
     av = fetch_avatar(avatar_url)
     if av:
         aw, ah = av.size
-        # Scale full height
+        # Scale fit chiều cao
         scale  = IMG_H / ah
         new_aw = int(aw * scale)
         av = av.resize((new_aw, IMG_H), Image.LANCZOS)
@@ -167,12 +150,9 @@ def render_quote(text: str, display_name: str, username: str, avatar_url: str) -
         paste_w = min(new_aw, AVATAR_MAX_W)
         av_crop = av.crop((0, 0, paste_w, IMG_H)).convert("RGBA")
 
-        # Tạo mask = fade_ngang × vignette_top_bottom
-        fade_mask = make_fade_mask(paste_w, IMG_H, fade_start=0.70)
-        vig_mask  = make_top_bottom_vignette(paste_w, IMG_H)
-        final_mask = combine_masks(fade_mask, vig_mask)
-
-        av_crop.putalpha(final_mask)
+        # Áp fade ngang thuần — mỗi cột X đều nhau từ trên xuống dưới
+        mask = make_horizontal_fade(paste_w, IMG_H, fade_start=0.65)
+        av_crop.putalpha(mask)
         canvas.paste(av_crop, (0, 0), av_crop)
 
     # ── Text ──────────────────────────────────────────────────────────────────
@@ -227,7 +207,7 @@ def render_quote(text: str, display_name: str, username: str, avatar_url: str) -
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "3"})
+    return jsonify({"status": "ok", "version": "4"})
 
 @app.route("/quote", methods=["POST"])
 def quote():
