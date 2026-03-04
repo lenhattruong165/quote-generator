@@ -205,6 +205,9 @@ def render_quote(text: str, display_name: str, username: str, avatar_url: str) -
     buf.seek(0)
     return buf.read()
 
+@app.route("/", methods=["GET"])
+def index():
+    return "Quote Generator API is Running!", 200
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "version": "4"})
