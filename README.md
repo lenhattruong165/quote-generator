@@ -1,10 +1,29 @@
 ---
-title: Quote Generator
-emoji: 🌍
-colorFrom: purple
-colorTo: indigo
+title: Quote Image Generator
+emoji: 💬
+colorFrom: gray
+colorTo: gray
 sdk: docker
 pinned: false
 ---
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+# Quote Image Generator
+
+API for Chang'e Aspirant Bot — by vy-lucyfer
+
+## Endpoint
+
+**POST** `/quote`
+
+```json
+{
+  "text": "nội dung quote",
+  "display_name": "Tên hiển thị",
+  "username": "username",
+  "avatar": "https://cdn.discordapp.com/avatars/..."
+}
+```
+
+Response: PNG binary (`image/png`)
+
+**GET** `/health` → `{"status": "ok"}`
