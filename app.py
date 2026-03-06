@@ -1,8 +1,8 @@
 """
-Quote Image Generator API v7
+Quote Image Generator API v8
 Chang'e Aspirant Bot — by vy-lucyfer
 
-v7: Fix emoji + text overflow cho cả landscape và portrait
+v8: Fix portrait fade sâu giống Make it a Quote
 """
 
 import io
@@ -24,13 +24,13 @@ STYLE_PORTRAIT = "portrait"
 # Landscape
 LANDSCAPE_W = 1200
 LANDSCAPE_H = 630
-LANDSCAPE_AVATAR_MAX_W = int(LANDSCAPE_W * 0.55)  # Giảm để text có chỗ
+LANDSCAPE_AVATAR_MAX_W = int(LANDSCAPE_W * 0.55)
 LANDSCAPE_TEXT_X = int(LANDSCAPE_W * 0.50)
-LANDSCAPE_TEXT_W = LANDSCAPE_W - LANDSCAPE_TEXT_X - 60  # Padding lớn hơn
+LANDSCAPE_TEXT_W = LANDSCAPE_W - LANDSCAPE_TEXT_X - 60
 
-# Portrait
+# Portrait - Giống Make it a Quote
 PORTRAIT_W = 800
-PORTRAIT_TEXT_PAD = 60  # Padding 2 bên
+PORTRAIT_TEXT_PAD = 60
 
 # Font
 FONT_MAX = 64
@@ -141,7 +141,7 @@ def get_segment_width(seg, font, emoji_size, draw):
         return emoji_size
 
 def wrap_segments(segments, font, max_w, emoji_size, draw):
-    """Wrap segments thành lines, đảm bảo không vượt quá max_w"""
+    """Wrap segments thành lines"""
     lines = []
     current_line = []
     current_w = 0
@@ -149,7 +149,6 @@ def wrap_segments(segments, font, max_w, emoji_size, draw):
     for seg in segments:
         seg_w = get_segment_width(seg, font, emoji_size, draw)
 
-        # Nếu segment đơn lẻ đã quá dài, cắt text
         if seg_w > max_w:
             if current_line:
                 lines.append(current_line)
@@ -157,18 +156,17 @@ def wrap_segments(segments, font, max_w, emoji_size, draw):
                 current_w = 0
 
             if seg[0] == "text":
-                # Cắt text dài
                 text = seg[1]
                 while text:
                     remaining = max_w - current_w if current_line else max_w
-                    if remaining <= 0:
+                    if remaining <= 10:
                         if current_line:
                             lines.append(current_line)
                         current_line = []
                         current_w = 0
                         remaining = max_w
 
-                    # Tìm độ dài text vừa khít
+                    # Tìm cut point
                     cut = 0
                     for i in range(1, len(text) + 1):
                         test_w = get_segment_width(("text", text[:i]), font, emoji_size, draw)
@@ -178,28 +176,25 @@ def wrap_segments(segments, font, max_w, emoji_size, draw):
                         cut = i
 
                     if cut == 0:
-                        cut = 1  # Ít nhất 1 char
+                        cut = 1
 
                     current_line.append(("text", text[:cut]))
                     current_w += get_segment_width(("text", text[:cut]), font, emoji_size, draw)
                     text = text[cut:]
 
-                    if current_w >= max_w * 0.9:  # Xuống dòng nếu gần đầy
+                    if current_w >= max_w * 0.95:
                         lines.append(current_line)
                         current_line = []
                         current_w = 0
-            else:
-                # Emoji quá lớn, bỏ qua
-                continue
+            continue
+
+        if current_w + seg_w > max_w and current_line:
+            lines.append(current_line)
+            current_line = [seg]
+            current_w = seg_w
         else:
-            # Check nếu thêm vào line hiện tại có vượt quá không
-            if current_w + seg_w > max_w and current_line:
-                lines.append(current_line)
-                current_line = [seg]
-                current_w = seg_w
-            else:
-                current_line.append(seg)
-                current_w += seg_w
+            current_line.append(seg)
+            current_w += seg_w
 
     if current_line:
         lines.append(current_line)
@@ -207,7 +202,7 @@ def wrap_segments(segments, font, max_w, emoji_size, draw):
     return lines
 
 def make_horizontal_fade(width: int, height: int, fade_start: float = 0.60):
-    """Mask fade ngang cho landscape - mượt hơn"""
+    """Mask fade ngang cho landscape"""
     mask = Image.new("L", (width, height), 255)
     pixels = mask.load()
     fade_px = int(width * fade_start)
@@ -224,19 +219,32 @@ def make_horizontal_fade(width: int, height: int, fade_start: float = 0.60):
 
     return mask
 
-def make_vertical_fade(width: int, height: int, fade_start: float = 0.55):
-    """Mask fade dọc cho portrait"""
+def make_vertical_fade_deep(width: int, height: int):
+    """
+    Mask fade dọc SÂU giống Make it a Quote:
+    - 0-40%: Ảnh rõ (alpha=255)
+    - 40-70%: Gradient xám → đen
+    - 70-100%: Đen hoàn toàn (alpha=0)
+    """
     mask = Image.new("L", (width, height), 255)
     pixels = mask.load()
-    fade_px = int(height * fade_start)
-    fade_len = max(1, height - fade_px)
+
+    fade_start = int(height * 0.40)   # Bắt đầu fade sớm hơn
+    fade_end = int(height * 0.75)     # Kết thúc fade, bắt đầu đen hoàn toàn
 
     for y in range(height):
-        if y < fade_px:
+        if y < fade_start:
+            # Ảnh rõ
             alpha = 255
+        elif y >= fade_end:
+            # Đen hoàn toàn
+            alpha = 0
         else:
-            p = (y - fade_px) / fade_len
-            alpha = int(255 * (1.0 - p) ** 1.3)
+            # Gradient mượt từ 255 → 0
+            p = (y - fade_start) / (fade_end - fade_start)
+            # Curve mạnh để đen nhanh hơn
+            alpha = int(255 * (1.0 - p) ** 0.8)
+
         for x in range(width):
             pixels[x, y] = alpha
 
@@ -257,7 +265,6 @@ def render_line(canvas, line, x, y, font, emoji_size, color):
             if emoji_img:
                 es = min(emoji_size, 64)
                 emoji_resized = emoji_img.resize((es, es), Image.LANCZOS)
-                # Căn giữa theo chiều dọc với text
                 y_offset = (font.size - es) // 2
                 canvas.paste(emoji_resized, (int(curr_x), int(y + y_offset)), emoji_resized)
                 curr_x += es + 2
@@ -272,7 +279,7 @@ def get_line_width(line, font, emoji_size, draw):
     return total
 
 def fit_text(segments, max_w, max_h, draw, is_portrait=False):
-    """Tìm font size phù hợp, trả về font và lines"""
+    """Tìm font size phù hợp"""
     for size in range(FONT_MAX, FONT_MIN - 1, -FONT_STEP):
         font = get_font("regular", size)
         emoji_size = int(size * 1.2)
@@ -281,18 +288,15 @@ def fit_text(segments, max_w, max_h, draw, is_portrait=False):
         lines = wrap_segments(segments, font, max_w - 20, emoji_size, draw)
         total_h = len(lines) * line_h
 
-        # Thêm chiều cao cho tên và username
         name_size = max(FONT_MIN, int(size * 0.55))
         user_size = max(14, int(size * 0.42))
         name_h = int(name_size * 1.3)
         user_h = int(user_size * 1.3)
 
         if is_portrait:
-            # Portrait: thêm 2 gạch ngang
-            total_h += (name_h + user_h + 80)  # Padding cho gạch và gap
+            total_h += (name_h + user_h + 100)
         else:
-            # Landscape: đơn giản hơn
-            total_h += (name_h + user_h + 40)
+            total_h += (name_h + user_h + 50)
 
         if total_h <= max_h or size == FONT_MIN:
             return {
@@ -305,13 +309,12 @@ def fit_text(segments, max_w, max_h, draw, is_portrait=False):
                 "user_font": get_font("regular", user_size),
                 "name_h": name_h,
                 "user_h": user_h,
-                "total_text_h": len(lines) * line_h
             }
 
     return None
 
 def render_landscape(text: str, display_name: str, username: str, avatar_url: str):
-    """Render landscape với emoji support"""
+    """Render landscape"""
     canvas = Image.new("RGBA", (LANDSCAPE_W, LANDSCAPE_H), COLOR_BG)
 
     # Avatar
@@ -325,12 +328,11 @@ def render_landscape(text: str, display_name: str, username: str, avatar_url: st
         paste_w = min(new_aw, LANDSCAPE_AVATAR_MAX_W)
         av_crop = av.crop((0, 0, paste_w, LANDSCAPE_H)).convert("RGBA")
 
-        # Fade ngang mượt
         mask = make_horizontal_fade(paste_w, LANDSCAPE_H, 0.60)
         av_crop.putalpha(mask)
         canvas.paste(av_crop, (0, 0), av_crop)
 
-    # Parse text với emoji
+    # Parse text
     segments = parse_text_with_emoji(text)
 
     # Tính toán text
@@ -382,11 +384,11 @@ def render_landscape(text: str, display_name: str, username: str, avatar_url: st
     return canvas.convert("RGB")
 
 def render_portrait(text: str, display_name: str, username: str, avatar_url: str):
-    """Render portrait với emoji và 2 gạch ngang"""
+    """Render portrait với fade SÂU giống Make it a Quote"""
     # Parse text
     segments = parse_text_with_emoji(text)
 
-    # Tính toán trước để biết chiều cao
+    # Tính toán trước
     dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     text_w = PORTRAIT_W - (PORTRAIT_TEXT_PAD * 2)
 
@@ -403,9 +405,13 @@ def render_portrait(text: str, display_name: str, username: str, avatar_url: str
             "user_h": 16
         }
 
-    # Tính chiều cao
+    # Chiều cao text area
     text_area_h = (len(text_info["lines"]) * text_info["line_h"]) + 100 + text_info["name_h"] + text_info["user_h"]
-    avatar_h = int(PORTRAIT_W * 1.1)  # Avatar cao hơn width
+
+    # Avatar cao hơn để có đủ chỗ fade
+    avatar_h = int(PORTRAIT_W * 1.3)  # Tăng chiều cao avatar
+
+    # Tổng chiều cao canvas
     canvas_h = avatar_h + text_area_h
 
     canvas = Image.new("RGBA", (PORTRAIT_W, canvas_h), COLOR_BG)
@@ -424,14 +430,14 @@ def render_portrait(text: str, display_name: str, username: str, avatar_url: str
             av_crop = Image.new("RGBA", (PORTRAIT_W, avatar_h), COLOR_BG)
             av_crop.paste(av, (0, 0))
 
-        # Fade dọc
-        mask = make_vertical_fade(PORTRAIT_W, avatar_h, 0.55)
+        # Fade SÂU giống Make it a Quote
+        mask = make_vertical_fade_deep(PORTRAIT_W, avatar_h)
         av_crop.putalpha(mask)
         canvas.paste(av_crop, (0, 0), av_crop)
 
-    # Text area
+    # Text area - đen solid
     draw = ImageDraw.Draw(canvas)
-    y = avatar_h + 30
+    y = avatar_h + 25
 
     # Gạch ngang 1
     line_w = int(PORTRAIT_W * 0.5)
@@ -486,15 +492,15 @@ def render_quote(text: str, display_name: str, username: str, avatar_url: str, s
 
 @app.route("/", methods=["GET"])
 def index():
-    return "Quote Generator API v7 is Running!", 200
+    return "Quote Generator API v8 is Running!", 200
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "ok", 
-        "version": "7", 
+        "version": "8", 
         "styles": ["landscape", "portrait"],
-        "features": ["emoji", "auto-wrap", "2-lines-portrait"]
+        "features": ["emoji", "deep-fade-portrait"]
     })
 
 @app.route("/quote", methods=["POST"])
