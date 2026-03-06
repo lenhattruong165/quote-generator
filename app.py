@@ -275,7 +275,7 @@ def render_landscape(text: str, display_name: str, username: str, avatar_url: st
         canvas.paste(av_crop, (0, 0), av_crop)
     segments = parse_text_with_emoji(text)
     dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    text_info = fit_text(segments, LANDSCAPE_TEXT_W, int(LANDSCAPE_H * 0.7), dummy, False, bool(server_name))
+    text_info = fit_text(segments, LANDSCAPE_TEXT_W, int(LANDSCAPE_H * 0.7), dummy, False, False)
     if not text_info:
         text_info = {
             "font": get_font("regular", FONT_MIN),
@@ -289,8 +289,7 @@ def render_landscape(text: str, display_name: str, username: str, avatar_url: st
             "user_h": 16,
             "server_h": 14
         }
-    extra_for_server = text_info["server_h"] + 10 if server_name else 0
-    total_content_h = (len(text_info["lines"]) * text_info["line_h"]) + 40 + text_info["name_h"] + text_info["user_h"] + extra_for_server
+    total_content_h = (len(text_info["lines"]) * text_info["line_h"]) + 40 + text_info["name_h"] + text_info["user_h"]
     start_y = (LANDSCAPE_H - total_content_h) // 2
     y = start_y
     for line in text_info["lines"]:
@@ -298,15 +297,6 @@ def render_landscape(text: str, display_name: str, username: str, avatar_url: st
         x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - line_w) // 2
         render_line(canvas, line, x, y, text_info["font"], text_info["emoji_size"], COLOR_TEXT)
         y += text_info["line_h"]
-    if server_name:
-        y += 15
-        server_text = f"@{server_name}"
-        bbox = dummy.textbbox((0, 0), server_text, font=text_info["server_font"])
-        server_w = bbox[2] - bbox[0]
-        x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - server_w) // 2
-        draw = ImageDraw.Draw(canvas)
-        draw.text((x, y), server_text, font=text_info["server_font"], fill=COLOR_SERVER)
-        y += text_info["server_h"] + 5
     else:
         y += 25
         draw = ImageDraw.Draw(canvas)
