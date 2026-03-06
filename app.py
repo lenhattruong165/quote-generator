@@ -1,15 +1,14 @@
 """
-Quote Image Generator API v6
+Quote Image Generator API v7
 Chang'e Aspirant Bot — by vy-lucyfer
 
-v6: Emoji support + 2 gạch ngang + portrait fix
+v7: Fix emoji + text overflow cho cả landscape và portrait
 """
 
 import io
 import os
 import re
 import urllib.request
-import json
 from flask import Flask, request, send_file, jsonify
 from PIL import Image, ImageDraw, ImageFont
 
@@ -25,37 +24,35 @@ STYLE_PORTRAIT = "portrait"
 # Landscape
 LANDSCAPE_W = 1200
 LANDSCAPE_H = 630
-LANDSCAPE_AVATAR_MAX_W = int(LANDSCAPE_W * 0.60)
-LANDSCAPE_TEXT_X = int(LANDSCAPE_W * 0.52)
-LANDSCAPE_TEXT_W = LANDSCAPE_W - LANDSCAPE_TEXT_X - 40
+LANDSCAPE_AVATAR_MAX_W = int(LANDSCAPE_W * 0.55)  # Giảm để text có chỗ
+LANDSCAPE_TEXT_X = int(LANDSCAPE_W * 0.50)
+LANDSCAPE_TEXT_W = LANDSCAPE_W - LANDSCAPE_TEXT_X - 60  # Padding lớn hơn
 
 # Portrait
 PORTRAIT_W = 800
-PORTRAIT_AVATAR_RATIO = 0.65  # Avatar chiếm 65% chiều cao
-PORTRAIT_FADE_START = 0.60    # Fade bắt đầu từ 60%
+PORTRAIT_TEXT_PAD = 60  # Padding 2 bên
 
 # Font
-FONT_MAX = 68
-FONT_MIN = 20
+FONT_MAX = 64
+FONT_MIN = 18
 FONT_STEP = 2
-LINE_HEIGHT_RATIO = 1.45
+LINE_HEIGHT_RATIO = 1.5
 
 # Colors
 COLOR_BG = (0, 0, 0, 255)
 COLOR_TEXT = (255, 255, 255, 255)
 COLOR_NAME = (230, 230, 230, 255)
 COLOR_USERNAME = (140, 140, 140, 255)
-COLOR_LINE = (100, 100, 100, 255)  # Màu gạch ngang
+COLOR_LINE = (100, 100, 100, 255)
 
 # Font URLs
 FONT_URLS = {
     "regular": "https://github.com/miq4d/fonts/raw/main/GeistSans/Geist-Regular.ttf",
     "medium": "https://github.com/miq4d/fonts/raw/main/GeistSans/Geist-Medium.ttf",
-    "emoji": "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf",
 }
 
 _font_cache = {}
-_emoji_cache = {}  # Cache emoji images
+_emoji_cache = {}
 
 def get_font(style="regular", size=32):
     """Lấy font từ cache hoặc download"""
@@ -73,7 +70,7 @@ def get_font(style="regular", size=32):
         _font_cache[key] = font
         return font
     except Exception as e:
-        print(f"[font] Failed to load {style} size {size}: {e}")
+        print(f"[font] Failed {style} {size}: {e}")
         try:
             return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
         except:
@@ -94,70 +91,141 @@ def fetch_avatar(url: str):
 
 def fetch_emoji(emoji_id: str, animated: bool = False):
     """Tải Discord emoji ảnh"""
-    if emoji_id in _emoji_cache:
-        return _emoji_cache[emoji_id]
+    cache_key = f"{emoji_id}_{animated}"
+    if cache_key in _emoji_cache:
+        return _emoji_cache[cache_key]
 
     ext = "gif" if animated else "png"
-    url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}?size=128"
+    url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}?size=64"
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "ChangE-Bot/1.0"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = resp.read()
-        img = Image.open(io.BytesIO(data))
-        if animated:
-            img = img.convert("RGBA")
-        _emoji_cache[emoji_id] = img
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        _emoji_cache[cache_key] = img
         return img
     except Exception as e:
-        print(f"[emoji] Failed to fetch {emoji_id}: {e}")
+        print(f"[emoji] Failed {emoji_id}: {e}")
         return None
 
-def parse_emojis(text: str):
-    """Parse text thành list (type, content) 
-    type: 'text' | 'emoji'
-    """
-    # Pattern: <:name:id> hoặc <a:name:id>
-    pattern = r'<(a?):(\w+):(\d+)>'
-    result = []
+def parse_text_with_emoji(text: str):
+    """Parse text thành segments (text/emoji)"""
+    pattern = r'<(a?):([^:]+):(\d+)>'
+    segments = []
     last_end = 0
 
     for match in re.finditer(pattern, text):
         start, end = match.span()
 
-        # Text trước emoji
         if start > last_end:
-            result.append(("text", text[last_end:start]))
+            segments.append(("text", text[last_end:start]))
 
-        # Emoji
         animated = match.group(1) == "a"
         emoji_id = match.group(3)
-        result.append(("emoji", emoji_id, animated))
+        segments.append(("emoji", emoji_id, animated))
 
         last_end = end
 
-    # Text còn lại
     if last_end < len(text):
-        result.append(("text", text[last_end:]))
+        segments.append(("text", text[last_end:]))
 
-    return result if result else [("text", text)]
+    return segments if segments else [("text", text)]
 
-def make_horizontal_fade(width: int, height: int, fade_start: float = 0.65):
-    """Mask fade ngang cho landscape"""
+def get_segment_width(seg, font, emoji_size, draw):
+    """Tính width của 1 segment"""
+    if seg[0] == "text":
+        bbox = draw.textbbox((0, 0), seg[1], font=font)
+        return bbox[2] - bbox[0]
+    else:
+        return emoji_size
+
+def wrap_segments(segments, font, max_w, emoji_size, draw):
+    """Wrap segments thành lines, đảm bảo không vượt quá max_w"""
+    lines = []
+    current_line = []
+    current_w = 0
+
+    for seg in segments:
+        seg_w = get_segment_width(seg, font, emoji_size, draw)
+
+        # Nếu segment đơn lẻ đã quá dài, cắt text
+        if seg_w > max_w:
+            if current_line:
+                lines.append(current_line)
+                current_line = []
+                current_w = 0
+
+            if seg[0] == "text":
+                # Cắt text dài
+                text = seg[1]
+                while text:
+                    remaining = max_w - current_w if current_line else max_w
+                    if remaining <= 0:
+                        if current_line:
+                            lines.append(current_line)
+                        current_line = []
+                        current_w = 0
+                        remaining = max_w
+
+                    # Tìm độ dài text vừa khít
+                    cut = 0
+                    for i in range(1, len(text) + 1):
+                        test_w = get_segment_width(("text", text[:i]), font, emoji_size, draw)
+                        if test_w > remaining:
+                            cut = i - 1
+                            break
+                        cut = i
+
+                    if cut == 0:
+                        cut = 1  # Ít nhất 1 char
+
+                    current_line.append(("text", text[:cut]))
+                    current_w += get_segment_width(("text", text[:cut]), font, emoji_size, draw)
+                    text = text[cut:]
+
+                    if current_w >= max_w * 0.9:  # Xuống dòng nếu gần đầy
+                        lines.append(current_line)
+                        current_line = []
+                        current_w = 0
+            else:
+                # Emoji quá lớn, bỏ qua
+                continue
+        else:
+            # Check nếu thêm vào line hiện tại có vượt quá không
+            if current_w + seg_w > max_w and current_line:
+                lines.append(current_line)
+                current_line = [seg]
+                current_w = seg_w
+            else:
+                current_line.append(seg)
+                current_w += seg_w
+
+    if current_line:
+        lines.append(current_line)
+
+    return lines
+
+def make_horizontal_fade(width: int, height: int, fade_start: float = 0.60):
+    """Mask fade ngang cho landscape - mượt hơn"""
     mask = Image.new("L", (width, height), 255)
-    draw = ImageDraw.Draw(mask)
+    pixels = mask.load()
     fade_px = int(width * fade_start)
     fade_len = max(1, width - fade_px)
 
-    for x in range(fade_px, width):
-        p = (x - fade_px) / fade_len
-        alpha = int(255 * max(0.0, (1.0 - p) ** 1.5))
-        draw.line([(x, 0), (x, height)], fill=alpha)
+    for x in range(width):
+        if x < fade_px:
+            alpha = 255
+        else:
+            p = (x - fade_px) / fade_len
+            alpha = int(255 * (1.0 - p) ** 1.5)
+        for y in range(height):
+            pixels[x, y] = alpha
 
     return mask
 
-def make_vertical_fade(width: int, height: int, fade_start: float = 0.60):
-    """Mask fade dọc cho portrait - gradient mượt"""
+def make_vertical_fade(width: int, height: int, fade_start: float = 0.55):
+    """Mask fade dọc cho portrait"""
     mask = Image.new("L", (width, height), 255)
     pixels = mask.load()
     fade_px = int(height * fade_start)
@@ -168,148 +236,176 @@ def make_vertical_fade(width: int, height: int, fade_start: float = 0.60):
             alpha = 255
         else:
             p = (y - fade_px) / fade_len
-            # Curve mượt hơn
-            alpha = int(255 * (1.0 - p) ** 1.2)
+            alpha = int(255 * (1.0 - p) ** 1.3)
         for x in range(width):
             pixels[x, y] = alpha
 
     return mask
 
-def calculate_text_width(parsed_text, font, emoji_size, draw):
-    """Tính chiều rộng text có emoji"""
-    total_w = 0
-    for item in parsed_text:
-        if item[0] == "text":
-            bbox = draw.textbbox((0, 0), item[1], font=font)
-            total_w += bbox[2] - bbox[0]
-        elif item[0] == "emoji":
-            total_w += emoji_size
-    return total_w
-
-def wrap_text_with_emoji(text: str, font, max_w: int, emoji_size: int, draw: ImageDraw.ImageDraw):
-    """Wrap text có emoji"""
-    parsed = parse_emojis(text)
-    lines = []
-    current_line = []
-    current_w = 0
-
-    for item in parsed:
-        if item[0] == "text":
-            words = item[1].split(" ")
-            for word in words:
-                word_bbox = draw.textbbox((0, 0), word + " ", font=font)
-                word_w = word_bbox[2] - word_bbox[0]
-
-                if current_w + word_w > max_w and current_line:
-                    lines.append(current_line)
-                    current_line = [("text", word + " ")]
-                    current_w = word_w
-                else:
-                    current_line.append(("text", word + " "))
-                    current_w += word_w
-
-        elif item[0] == "emoji":
-            if current_w + emoji_size > max_w and current_line:
-                lines.append(current_line)
-                current_line = [item]
-                current_w = emoji_size
-            else:
-                current_line.append(item)
-                current_w += emoji_size
-
-    if current_line:
-        lines.append(current_line)
-
-    return lines
-
-def fit_text_portrait(text: str, max_w: int, draw: ImageDraw.ImageDraw):
-    """Tìm font size phù hợp cho portrait"""
-    for size in range(FONT_MAX, FONT_MIN - 1, -FONT_STEP):
-        font = get_font("regular", size)
-        emoji_size = int(size * 1.1)
-        lines = wrap_text_with_emoji(text, font, max_w - 40, emoji_size, draw)
-        line_h = int(size * LINE_HEIGHT_RATIO)
-
-        # Tính chiều cao
-        name_size = max(FONT_MIN, int(size * 0.55))
-        user_size = max(14, int(size * 0.42))
-        name_font = get_font("medium", name_size)
-        user_font = get_font("regular", user_size)
-
-        name_h = line_h
-        user_h = int(user_size * 1.3)
-        gap = int(size * 0.5)
-        line_gap = int(size * 0.8)  # Gap giữa 2 gạch ngang
-
-        # Tổng chiều cao = text + gạch1 + gap + gạch2 + tên + username + padding
-        text_h = len(lines) * line_h
-        total_h = text_h + (gap * 3) + line_gap + name_h + user_h + 40
-
-        return {
-            "font": font,
-            "lines": lines,
-            "line_h": line_h,
-            "size": size,
-            "emoji_size": emoji_size,
-            "name_font": name_font,
-            "user_font": user_font,
-            "name_h": name_h,
-            "user_h": user_h,
-            "gap": gap,
-            "line_gap": line_gap,
-            "total_h": total_h
-        }
-
-    # Fallback
-    font = get_font("regular", FONT_MIN)
-    emoji_size = int(FONT_MIN * 1.1)
-    lines = wrap_text_with_emoji(text, font, max_w - 40, emoji_size, draw)
-    return {
-        "font": font,
-        "lines": lines,
-        "line_h": int(FONT_MIN * LINE_HEIGHT_RATIO),
-        "size": FONT_MIN,
-        "emoji_size": emoji_size,
-        "name_font": get_font("medium", FONT_MIN),
-        "user_font": get_font("regular", 14),
-        "name_h": FONT_MIN,
-        "user_h": 18,
-        "gap": 10,
-        "line_gap": 15,
-        "total_h": len(lines) * int(FONT_MIN * LINE_HEIGHT_RATIO) + 100
-    }
-
-def render_text_line(draw, line, x, y, font, emoji_size, color):
-    """Render 1 dòng text có emoji"""
+def render_line(canvas, line, x, y, font, emoji_size, color):
+    """Render 1 line gồm text và emoji"""
+    draw = ImageDraw.Draw(canvas)
     curr_x = x
-    for item in line:
-        if item[0] == "text":
-            draw.text((curr_x, y), item[1], font=font, fill=color)
-            bbox = draw.textbbox((curr_x, y), item[1], font=font)
+
+    for seg in line:
+        if seg[0] == "text":
+            draw.text((curr_x, y), seg[1], font=font, fill=color)
+            bbox = draw.textbbox((curr_x, y), seg[1], font=font)
             curr_x += bbox[2] - bbox[0]
-        elif item[0] == "emoji":
-            emoji_img = fetch_emoji(item[1], item[2])
+        elif seg[0] == "emoji":
+            emoji_img = fetch_emoji(seg[1], seg[2])
             if emoji_img:
-                # Resize emoji
-                es = emoji_size
+                es = min(emoji_size, 64)
                 emoji_resized = emoji_img.resize((es, es), Image.LANCZOS)
-                # Paste vào canvas
-                draw._image.paste(emoji_resized, (int(curr_x), int(y)), emoji_resized)
-                curr_x += es
+                # Căn giữa theo chiều dọc với text
+                y_offset = (font.size - es) // 2
+                canvas.paste(emoji_resized, (int(curr_x), int(y + y_offset)), emoji_resized)
+                curr_x += es + 2
             else:
-                # Fallback: bỏ qua nếu không tải được
                 curr_x += emoji_size
 
-def render_portrait(text: str, display_name: str, username: str, avatar_url: str):
-    """Render style portrait với 2 gạch ngang và emoji"""
-    dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+def get_line_width(line, font, emoji_size, draw):
+    """Tính tổng width của line"""
+    total = 0
+    for seg in line:
+        total += get_segment_width(seg, font, emoji_size, draw)
+    return total
+
+def fit_text(segments, max_w, max_h, draw, is_portrait=False):
+    """Tìm font size phù hợp, trả về font và lines"""
+    for size in range(FONT_MAX, FONT_MIN - 1, -FONT_STEP):
+        font = get_font("regular", size)
+        emoji_size = int(size * 1.2)
+        line_h = int(size * LINE_HEIGHT_RATIO)
+
+        lines = wrap_segments(segments, font, max_w - 20, emoji_size, draw)
+        total_h = len(lines) * line_h
+
+        # Thêm chiều cao cho tên và username
+        name_size = max(FONT_MIN, int(size * 0.55))
+        user_size = max(14, int(size * 0.42))
+        name_h = int(name_size * 1.3)
+        user_h = int(user_size * 1.3)
+
+        if is_portrait:
+            # Portrait: thêm 2 gạch ngang
+            total_h += (name_h + user_h + 80)  # Padding cho gạch và gap
+        else:
+            # Landscape: đơn giản hơn
+            total_h += (name_h + user_h + 40)
+
+        if total_h <= max_h or size == FONT_MIN:
+            return {
+                "font": font,
+                "emoji_size": emoji_size,
+                "line_h": line_h,
+                "lines": lines,
+                "size": size,
+                "name_font": get_font("medium", name_size),
+                "user_font": get_font("regular", user_size),
+                "name_h": name_h,
+                "user_h": user_h,
+                "total_text_h": len(lines) * line_h
+            }
+
+    return None
+
+def render_landscape(text: str, display_name: str, username: str, avatar_url: str):
+    """Render landscape với emoji support"""
+    canvas = Image.new("RGBA", (LANDSCAPE_W, LANDSCAPE_H), COLOR_BG)
+
+    # Avatar
+    av = fetch_avatar(avatar_url)
+    if av:
+        aw, ah = av.size
+        scale = LANDSCAPE_H / ah
+        new_aw = int(aw * scale)
+        av = av.resize((new_aw, LANDSCAPE_H), Image.LANCZOS)
+
+        paste_w = min(new_aw, LANDSCAPE_AVATAR_MAX_W)
+        av_crop = av.crop((0, 0, paste_w, LANDSCAPE_H)).convert("RGBA")
+
+        # Fade ngang mượt
+        mask = make_horizontal_fade(paste_w, LANDSCAPE_H, 0.60)
+        av_crop.putalpha(mask)
+        canvas.paste(av_crop, (0, 0), av_crop)
+
+    # Parse text với emoji
+    segments = parse_text_with_emoji(text)
 
     # Tính toán text
-    text_info = fit_text_portrait(text, PORTRAIT_W - 80, dummy)
+    dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    text_info = fit_text(segments, LANDSCAPE_TEXT_W, int(LANDSCAPE_H * 0.7), dummy, False)
 
-    # Chiều cao các phần
-    avatar_h = int(PORTRAIT_W * 1.2)  # Avatar cao hơn width một chút
-    text_area_h = text_info["total_h"]
+    if not text_info:
+        text_info = {
+            "font": get_font("regular", FONT_MIN),
+            "emoji_size": 24,
+            "line_h": 30,
+            "lines": wrap_segments(segments, get_font("regular", FONT_MIN), 
+                                  LANDSCAPE_TEXT_W - 20, 24, dummy),
+            "name_font": get_font("medium", FONT_MIN),
+            "user_font": get_font("regular", 14),
+            "name_h": 20,
+            "user_h": 16
+        }
+
+    # Tính vị trí căn giữa
+    total_content_h = (len(text_info["lines"]) * text_info["line_h"]) + 40 + text_info["name_h"] + text_info["user_h"]
+    start_y = (LANDSCAPE_H - total_content_h) // 2
+
+    # Render text
+    y = start_y
+    for line in text_info["lines"]:
+        line_w = get_line_width(line, text_info["font"], text_info["emoji_size"], dummy)
+        x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - line_w) // 2
+        render_line(canvas, line, x, y, text_info["font"], text_info["emoji_size"], COLOR_TEXT)
+        y += text_info["line_h"]
+
+    # Tên
+    y += 25
+    name_text = f"— {display_name}"
+    bbox = dummy.textbbox((0, 0), name_text, font=text_info["name_font"])
+    name_w = bbox[2] - bbox[0]
+    x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - name_w) // 2
+    draw = ImageDraw.Draw(canvas)
+    draw.text((x, y), name_text, font=text_info["name_font"], fill=COLOR_NAME)
+
+    # Username
+    y += text_info["name_h"] + 8
+    user_text = f"@{username}"
+    bbox = dummy.textbbox((0, 0), user_text, font=text_info["user_font"])
+    user_w = bbox[2] - bbox[0]
+    x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - user_w) // 2
+    draw.text((x, y), user_text, font=text_info["user_font"], fill=COLOR_USERNAME)
+
+    return canvas.convert("RGB")
+
+def render_portrait(text: str, display_name: str, username: str, avatar_url: str):
+    """Render portrait với emoji và 2 gạch ngang"""
+    # Parse text
+    segments = parse_text_with_emoji(text)
+
+    # Tính toán trước để biết chiều cao
+    dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    text_w = PORTRAIT_W - (PORTRAIT_TEXT_PAD * 2)
+
+    text_info = fit_text(segments, text_w, 500, dummy, True)
+    if not text_info:
+        text_info = {
+            "font": get_font("regular", FONT_MIN),
+            "emoji_size": 24,
+            "line_h": 30,
+            "lines": wrap_segments(segments, get_font("regular", FONT_MIN), text_w - 20, 24, dummy),
+            "name_font": get_font("medium", FONT_MIN),
+            "user_font": get_font("regular", 14),
+            "name_h": 20,
+            "user_h": 16
+        }
+
+    # Tính chiều cao
+    text_area_h = (len(text_info["lines"]) * text_info["line_h"]) + 100 + text_info["name_h"] + text_info["user_h"]
+    avatar_h = int(PORTRAIT_W * 1.1)  # Avatar cao hơn width
     canvas_h = avatar_h + text_area_h
 
     canvas = Image.new("RGBA", (PORTRAIT_W, canvas_h), COLOR_BG)
@@ -318,57 +414,42 @@ def render_portrait(text: str, display_name: str, username: str, avatar_url: str
     av = fetch_avatar(avatar_url)
     if av:
         aw, ah = av.size
-        # Scale để fit width
         scale = PORTRAIT_W / aw
         new_ah = int(ah * scale)
         av = av.resize((PORTRAIT_W, new_ah), Image.LANCZOS)
 
-        # Crop hoặc pad
         if new_ah >= avatar_h:
             av_crop = av.crop((0, 0, PORTRAIT_W, avatar_h))
         else:
             av_crop = Image.new("RGBA", (PORTRAIT_W, avatar_h), COLOR_BG)
             av_crop.paste(av, (0, 0))
 
-        # Fade dọc mượt
-        mask = make_vertical_fade(PORTRAIT_W, avatar_h, PORTRAIT_FADE_START)
+        # Fade dọc
+        mask = make_vertical_fade(PORTRAIT_W, avatar_h, 0.55)
         av_crop.putalpha(mask)
         canvas.paste(av_crop, (0, 0), av_crop)
 
-    # Text area - solid black background
+    # Text area
     draw = ImageDraw.Draw(canvas)
-    text_start_y = avatar_h + 20
+    y = avatar_h + 30
 
-    # Vẽ background đen solid cho text area (tùy chọn, làm nổi text)
-    # draw.rectangle([0, avatar_h, PORTRAIT_W, canvas_h], fill=(0, 0, 0, 255))
+    # Gạch ngang 1
+    line_w = int(PORTRAIT_W * 0.5)
+    line_x = (PORTRAIT_W - line_w) // 2
+    draw.line([(line_x, y), (line_x + line_w, y)], fill=COLOR_LINE, width=2)
+    y += 20
 
-    y = text_start_y
-
-    # Gạch ngang 1 (trên quote)
-    line_width = int(PORTRAIT_W * 0.6)
-    line_x = (PORTRAIT_W - line_width) // 2
-    draw.line([(line_x, y), (line_x + line_width, y)], fill=COLOR_LINE, width=2)
-    y += text_info["gap"]
-
-    # Quote text (căn giữa)
+    # Quote text
     for line in text_info["lines"]:
-        line_w = 0
-        for item in line:
-            if item[0] == "text":
-                bbox = dummy.textbbox((0, 0), item[1], font=text_info["font"])
-                line_w += bbox[2] - bbox[0]
-            else:
-                line_w += text_info["emoji_size"]
-
-        x = (PORTRAIT_W - line_w) // 2
-        render_text_line(draw, line, x, y, text_info["font"], 
-                        text_info["emoji_size"], COLOR_TEXT)
+        line_w_actual = get_line_width(line, text_info["font"], text_info["emoji_size"], dummy)
+        x = (PORTRAIT_W - line_w_actual) // 2
+        render_line(canvas, line, x, y, text_info["font"], text_info["emoji_size"], COLOR_TEXT)
         y += text_info["line_h"]
 
-    # Gạch ngang 2 (dưới quote)
-    y += text_info["gap"]
-    draw.line([(line_x, y), (line_x + line_width, y)], fill=COLOR_LINE, width=2)
-    y += text_info["line_gap"]
+    # Gạch ngang 2
+    y += 15
+    draw.line([(line_x, y), (line_x + line_w, y)], fill=COLOR_LINE, width=2)
+    y += 25
 
     # Tên
     name_text = f"— {display_name}"
@@ -384,77 +465,6 @@ def render_portrait(text: str, display_name: str, username: str, avatar_url: str
     user_w = bbox[2] - bbox[0]
     x = (PORTRAIT_W - user_w) // 2
     draw.text((x, y), user_text, font=text_info["user_font"], fill=COLOR_USERNAME)
-
-    return canvas.convert("RGB")
-
-def render_landscape(text: str, display_name: str, username: str, avatar_url: str):
-    """Render style landscape (giữ nguyên v4)"""
-    canvas = Image.new("RGBA", (LANDSCAPE_W, LANDSCAPE_H), COLOR_BG)
-
-    # Avatar
-    av = fetch_avatar(avatar_url)
-    if av:
-        aw, ah = av.size
-        scale = LANDSCAPE_H / ah
-        new_aw = int(aw * scale)
-        av = av.resize((new_aw, LANDSCAPE_H), Image.LANCZOS)
-
-        paste_w = min(new_aw, LANDSCAPE_AVATAR_MAX_W)
-        av_crop = av.crop((0, 0, paste_w, LANDSCAPE_H)).convert("RGBA")
-
-        mask = make_horizontal_fade(paste_w, LANDSCAPE_H, 0.65)
-        av_crop.putalpha(mask)
-        canvas.paste(av_crop, (0, 0), av_crop)
-
-    # Text
-    dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    font = get_font("regular", 48)
-    name_font = get_font("medium", 28)
-    user_font = get_font("regular", 22)
-
-    # Simple wrap
-    words = text.split()
-    lines = []
-    current = ""
-    for word in words:
-        test = (current + " " + word).strip() if current else word
-        bbox = dummy.textbbox((0, 0), test, font=font)
-        if bbox[2] - bbox[0] <= LANDSCAPE_TEXT_W - 30:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-
-    line_h = int(48 * 1.4)
-    total_text_h = len(lines) * line_h + 60 + 28 + 22
-    start_y = (LANDSCAPE_H - total_text_h) // 2
-
-    draw = ImageDraw.Draw(canvas)
-    y = start_y
-
-    for line in lines:
-        bbox = dummy.textbbox((0, 0), line, font=font)
-        lw = bbox[2] - bbox[0]
-        x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - lw) // 2
-        draw.text((x, y), line, font=font, fill=COLOR_TEXT)
-        y += line_h
-
-    y += 30
-    name_text = f"— {display_name}"
-    bbox = dummy.textbbox((0, 0), name_text, font=name_font)
-    name_w = bbox[2] - bbox[0]
-    x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - name_w) // 2
-    draw.text((x, y), name_text, font=name_font, fill=COLOR_NAME)
-    y += 35
-
-    user_text = f"@{username}"
-    bbox = dummy.textbbox((0, 0), user_text, font=user_font)
-    user_w = bbox[2] - bbox[0]
-    x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - user_w) // 2
-    draw.text((x, y), user_text, font=user_font, fill=COLOR_USERNAME)
 
     return canvas.convert("RGB")
 
@@ -476,11 +486,16 @@ def render_quote(text: str, display_name: str, username: str, avatar_url: str, s
 
 @app.route("/", methods=["GET"])
 def index():
-    return "Quote Generator API v6 is Running!", 200
+    return "Quote Generator API v7 is Running!", 200
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "6", "styles": ["landscape", "portrait"], "features": ["emoji", "2-lines"]})
+    return jsonify({
+        "status": "ok", 
+        "version": "7", 
+        "styles": ["landscape", "portrait"],
+        "features": ["emoji", "auto-wrap", "2-lines-portrait"]
+    })
 
 @app.route("/quote", methods=["POST"])
 def quote():
