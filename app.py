@@ -180,16 +180,21 @@ def make_horizontal_fade(width: int, height: int, fade_start: float = 0.60):
     return mask
 
 def make_vertical_fade_light(width: int, height: int):
+    """
+    Fade dọc: sáng từ trên → bắt đầu fade ở 60% height → đen hoàn toàn.
+    curve 2.0 = fade nhanh và rõ ràng.
+    """
     mask = Image.new("L", (width, height), 255)
     pixels = mask.load()
-    fade_start = int(height * 0.75)
+    fade_start = int(height * 0.60)
     fade_end = height
+    fade_len = max(1, fade_end - fade_start)
     for y in range(height):
         if y < fade_start:
             alpha = 255
         else:
-            p = (y - fade_start) / (fade_end - fade_start)
-            alpha = int(255 * (1.0 - p) ** 0.5)
+            p = (y - fade_start) / fade_len
+            alpha = int(255 * max(0.0, (1.0 - p) ** 2.0))
         for x in range(width):
             pixels[x, y] = alpha
     return mask
@@ -322,7 +327,8 @@ def render_portrait(text: str, display_name: str, username: str, avatar_url: str
     segments = parse_text_with_emoji(text)
     dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     text_w = PORTRAIT_W - (PORTRAIT_TEXT_PAD * 2)
-    text_info = fit_text(segments, text_w, 500, dummy, True, bool(server_name))
+    # has_server=False vì server_name giờ nằm trên avatar, không tính vào text area
+    text_info = fit_text(segments, text_w, 500, dummy, True, False)
     if not text_info:
         text_info = {
             "font": get_font("regular", FONT_MIN),
@@ -337,11 +343,11 @@ def render_portrait(text: str, display_name: str, username: str, avatar_url: str
             "server_h": 14
         }
     quote_h = len(text_info["lines"]) * text_info["line_h"]
-    server_h = text_info["server_h"] + 15 if server_name else 0
-    text_area_h = quote_h + server_h + text_info["name_h"] + text_info["user_h"] + 100
+    text_area_h = quote_h + text_info["name_h"] + text_info["user_h"] + 100
     avatar_h = int(PORTRAIT_W * 1.2)
     canvas_h = avatar_h + text_area_h
     canvas = Image.new("RGBA", (PORTRAIT_W, canvas_h), COLOR_BG)
+
     av = fetch_avatar(avatar_url)
     if av:
         aw, ah = av.size
@@ -353,36 +359,55 @@ def render_portrait(text: str, display_name: str, username: str, avatar_url: str
         else:
             av_crop = Image.new("RGBA", (PORTRAIT_W, avatar_h), COLOR_BG)
             av_crop.paste(av, (0, 0))
+
+        # ── server_name: vẽ lên av_crop TRƯỚC fade, sát trái, ngay trên điểm fade bắt đầu ──
+        if server_name:
+            fade_start_y = int(avatar_h * 0.60)
+            server_font  = text_info["server_font"]
+            server_text  = f"@{server_name}"
+            sb     = dummy.textbbox((0, 0), server_text, font=server_font)
+            s_h    = sb[3] - sb[1]
+            # Y: ngay trên điểm fade bắt đầu, lùi lên 1 dòng + padding nhỏ
+            s_y    = fade_start_y - s_h - 10
+            s_x    = PORTRAIT_TEXT_PAD  # sát trái
+            av_draw = ImageDraw.Draw(av_crop)
+            av_draw.text((s_x, s_y), server_text, font=server_font, fill=COLOR_SERVER)
+
+        # Áp fade mask SAU khi đã vẽ server_name
         mask = make_vertical_fade_light(PORTRAIT_W, avatar_h)
         av_crop.putalpha(mask)
         canvas.paste(av_crop, (0, 0), av_crop)
+
     draw = ImageDraw.Draw(canvas)
     y = avatar_h + 20
+
+    # Line kẻ ngang trên
     line_w = int(PORTRAIT_W * 0.5)
     line_x = (PORTRAIT_W - line_w) // 2
     draw.line([(line_x, y), (line_x + line_w, y)], fill=COLOR_LINE, width=2)
-    y += 15
-    if server_name:
-        server_text = f"@{server_name}"
-        bbox = dummy.textbbox((0, 0), server_text, font=text_info["server_font"])
-        server_w = bbox[2] - bbox[0]
-        x = (PORTRAIT_W - server_w) // 2
-        draw.text((x, y), server_text, font=text_info["server_font"], fill=COLOR_SERVER)
-        y += text_info["server_h"] + 15
+    y += 25
+
+    # Quote text (không còn server_name ở đây)
     for line in text_info["lines"]:
         line_w_actual = get_line_width(line, text_info["font"], text_info["emoji_size"], dummy)
         x = (PORTRAIT_W - line_w_actual) // 2
         render_line(canvas, line, x, y, text_info["font"], text_info["emoji_size"], COLOR_TEXT)
         y += text_info["line_h"]
+
     y += 15
+    # Line kẻ ngang dưới
     draw.line([(line_x, y), (line_x + line_w, y)], fill=COLOR_LINE, width=2)
     y += 25
+
+    # DisplayName
     name_text = f"— {display_name}"
     bbox = dummy.textbbox((0, 0), name_text, font=text_info["name_font"])
     name_w = bbox[2] - bbox[0]
     x = (PORTRAIT_W - name_w) // 2
     draw.text((x, y), name_text, font=text_info["name_font"], fill=COLOR_NAME)
     y += text_info["name_h"] + 5
+
+    # @username
     user_text = f"@{username}"
     bbox = dummy.textbbox((0, 0), user_text, font=text_info["user_font"])
     user_w = bbox[2] - bbox[0]
