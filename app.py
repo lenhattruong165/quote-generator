@@ -1,58 +1,87 @@
 """
-Quote Image Generator API v4
+Quote Image Generator API v5
 Chang'e Aspirant Bot — by vy-lucyfer
 
-Fix v4: Fade NGANG THUẦN — linear gradient X, đều từ trên xuống dưới.
-Không vignette, không top/bottom effect. Giống "Make it a Quote" chuẩn.
+v5: Thêm style portrait + landscape, font GeistSans, dynamic height
 """
 
 import io
 import os
 import urllib.request
+import json
 from flask import Flask, request, send_file, jsonify
 from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 
-IMG_W = 1200
-IMG_H = 630
-AVATAR_MAX_W = int(IMG_W * 0.60)  # 720px — avatar tối đa
-TEXT_X   = int(IMG_W * 0.52)      # 624px — text bắt đầu (overlap nhẹ với avatar)
-TEXT_W   = IMG_W - TEXT_X - 40    # ~536px
-TEXT_PAD = 15
+# ═════════════════════════════════════════════════════════════════════════════
+# CONFIG
+# ═════════════════════════════════════════════════════════════════════════════
 
-FONT_MAX  = 62
-FONT_MIN  = 18
+# Style configs
+STYLE_LANDSCAPE = "landscape"
+STYLE_PORTRAIT = "portrait"
+
+# Landscape (hình 1 style)
+LANDSCAPE_W = 1200
+LANDSCAPE_H = 630
+LANDSCAPE_AVATAR_MAX_W = int(LANDSCAPE_W * 0.60)
+LANDSCAPE_TEXT_X = int(LANDSCAPE_W * 0.52)
+LANDSCAPE_TEXT_W = LANDSCAPE_W - LANDSCAPE_TEXT_X - 40
+
+# Portrait (hình 2 style)  
+PORTRAIT_W = 800
+PORTRAIT_MIN_H = 1000
+PORTRAIT_AVATAR_H = int(PORTRAIT_MIN_H * 0.60)  # Avatar chiếm 60% chiều cao
+
+# Font settings
+FONT_MAX = 72
+FONT_MIN = 18
 FONT_STEP = 2
+LINE_HEIGHT_RATIO = 1.4
 
-COLOR_BG       = (0,   0,   0,   255)
-COLOR_TEXT     = (255, 255, 255, 255)
-COLOR_NAME     = (230, 230, 230, 255)
-COLOR_USERNAME = (110, 110, 110, 255)
+# Colors
+COLOR_BG = (0, 0, 0, 255)
+COLOR_TEXT = (255, 255, 255, 255)
+COLOR_NAME = (230, 230, 230, 255)
+COLOR_USERNAME = (140, 140, 140, 255)
 
-FONT_PATHS = [
-    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-]
-FONT_ITALIC_PATHS = [
-    "/usr/share/fonts/truetype/noto/NotoSans-Italic.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
-]
+# Font URLs từ miq4d/fonts repo (GeistSans)
+FONT_URLS = {
+    "regular": "https://github.com/miq4d/fonts/raw/main/GeistSans/Geist-Regular.ttf",
+    "medium": "https://github.com/miq4d/fonts/raw/main/GeistSans/Geist-Medium.ttf",
+    "semibold": "https://github.com/miq4d/fonts/raw/main/GeistSans/Geist-SemiBold.ttf",
+}
 
-def find_font(paths, size):
-    for p in paths:
-        if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, size)
-            except Exception:
-                continue
-    return ImageFont.load_default()
+# Cache font
+_font_cache = {}
+
+def get_font(style="regular", size=32):
+    """Lấy font từ cache hoặc download"""
+    key = f"{style}_{size}"
+    if key in _font_cache:
+        return _font_cache[key]
+
+    # Thử download font từ GitHub
+    try:
+        url = FONT_URLS.get(style, FONT_URLS["regular"])
+        req = urllib.request.Request(url, headers={"User-Agent": "ChangE-Bot/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            font_data = resp.read()
+
+        font = ImageFont.truetype(io.BytesIO(font_data), size)
+        _font_cache[key] = font
+        return font
+    except Exception as e:
+        print(f"[font] Failed to load {style} size {size}: {e}")
+        # Fallback to default
+        try:
+            return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
+        except:
+            return ImageFont.load_default()
 
 def fetch_avatar(url: str):
+    """Tải avatar từ URL"""
     if not url:
         return None
     try:
@@ -61,176 +90,351 @@ def fetch_avatar(url: str):
             data = resp.read()
         return Image.open(io.BytesIO(data)).convert("RGBA")
     except Exception as e:
-        print(f"[avatar] {e}")
+        print(f"[avatar] Error: {e}")
         return None
 
-def make_horizontal_fade(width: int, height: int, fade_start: float = 0.65) -> Image.Image:
-    """
-    Mask NGANG THUẦN:
-    - Từ x=0 đến x=fade_start*width: alpha=255 (hiện ảnh)
-    - Từ fade_start đến cuối: fade tuyến tính → 0 (đen)
-    - Mỗi cột X có cùng alpha từ trên xuống dưới (đường thẳng đứng đều)
-    """
+def make_horizontal_fade(width: int, height: int, fade_start: float = 0.65):
+    """Mask fade ngang (cho landscape) - từ trái sang phải"""
     mask = Image.new("L", (width, height), 255)
     draw = ImageDraw.Draw(mask)
-    fade_px  = int(width * fade_start)
+    fade_px = int(width * fade_start)
     fade_len = max(1, width - fade_px)
+
     for x in range(fade_px, width):
-        p     = (x - fade_px) / fade_len
-        # Curve nhẹ để fade mượt nhưng vẫn ngang đều
+        p = (x - fade_px) / fade_len
         alpha = int(255 * max(0.0, (1.0 - p) ** 1.5))
-        # Vẽ cột dọc toàn bộ height với cùng alpha
         draw.line([(x, 0), (x, height)], fill=alpha)
+
     return mask
 
-def smart_wrap(text: str, font, max_w: int, dummy) -> list:
-    """Wrap với hard-cut cho text không có space."""
+def make_vertical_fade(width: int, height: int, fade_start: float = 0.55):
+    """Mask fade dọc (cho portrait) - từ trên xuống dưới"""
+    mask = Image.new("L", (width, height), 255)
+    draw = ImageDraw.Draw(mask)
+    fade_px = int(height * fade_start)
+    fade_len = max(1, height - fade_px)
+
+    for y in range(fade_px, height):
+        p = (y - fade_px) / fade_len
+        alpha = int(255 * max(0.0, (1.0 - p) ** 2.0))
+        draw.line([(0, y), (width, y)], fill=alpha)
+
+    return mask
+
+def smart_wrap(text: str, font, max_w: int, draw: ImageDraw.ImageDraw):
+    """Wrap text thông minh, cắt từ nếu quá dài"""
     words = text.split()
     if not words:
-        return [text]
-    lines   = []
+        return [text] if text else [""]
+
+    lines = []
     current = ""
+
     for word in words:
-        while True:
-            b = dummy.textbbox((0, 0), word, font=font)
-            if b[2] - b[0] <= max_w:
-                break
-            cut_found = False
-            for cut in range(len(word) - 1, 0, -1):
-                b2 = dummy.textbbox((0, 0), word[:cut], font=font)
-                if b2[2] - b2[0] <= max_w:
-                    lines.append(word[:cut])
-                    word = word[cut:]
-                    cut_found = True
-                    break
-            if not cut_found:
-                break
+        # Kiểm tra nếu từ đơn lẻ đã quá dài
+        word_bbox = draw.textbbox((0, 0), word, font=font)
+        word_w = word_bbox[2] - word_bbox[0]
+
+        if word_w > max_w:
+            # Cắt từ dài thành nhiều phần
+            if current:
+                lines.append(current)
+                current = ""
+
+            # Cắt từ dài
+            part = ""
+            for char in word:
+                test_part = part + char
+                test_bbox = draw.textbbox((0, 0), test_part, font=font)
+                if test_bbox[2] - test_bbox[0] > max_w and part:
+                    lines.append(part)
+                    part = char
+                else:
+                    part = test_part
+            if part:
+                lines.append(part)
+            continue
+
+        # Thử thêm từ vào dòng hiện tại
         test = (current + " " + word).strip() if current else word
-        b    = dummy.textbbox((0, 0), test, font=font)
-        if b[2] - b[0] <= max_w:
+        test_bbox = draw.textbbox((0, 0), test, font=font)
+        test_w = test_bbox[2] - test_bbox[0]
+
+        if test_w <= max_w:
             current = test
         else:
             if current:
                 lines.append(current)
             current = word
+
     if current:
         lines.append(current)
-    return lines or [text]
 
-def fit_text(text: str, max_w: int, max_h: int):
-    dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    return lines if lines else [text]
+
+def calculate_text_height(lines, line_h, name_h, user_h, gap):
+    """Tính tổng chiều cao text area"""
+    return (len(lines) * line_h) + gap + name_h + (name_h // 3) + user_h
+
+def fit_text_portrait(text: str, max_w: int, max_h: int, draw: ImageDraw.ImageDraw):
+    """Tìm font size phù hợp cho portrait (text ở dưới)"""
     for size in range(FONT_MAX, FONT_MIN - 1, -FONT_STEP):
-        font   = find_font(FONT_PATHS, size)
-        lines  = smart_wrap(text, font, max_w, dummy)
-        line_h = int(size * 1.38)
-        total_h = line_h * len(lines)
-        max_lw  = 0
-        for l in lines:
-            b = dummy.textbbox((0, 0), l, font=font)
-            max_lw = max(max_lw, b[2] - b[0])
-        if total_h <= max_h and max_lw <= max_w:
-            return font, lines, line_h, size
-    font  = find_font(FONT_PATHS, FONT_MIN)
-    lines = smart_wrap(text, font, max_w, dummy)
-    return font, lines, int(FONT_MIN * 1.38), FONT_MIN
+        font = get_font("regular", size)
+        lines = smart_wrap(text, font, max_w, draw)
+        line_h = int(size * LINE_HEIGHT_RATIO)
 
-def render_quote(text: str, display_name: str, username: str, avatar_url: str) -> bytes:
-    canvas = Image.new("RGBA", (IMG_W, IMG_H), COLOR_BG)
+        # Tính chiều cao tên và username
+        name_size = max(FONT_MIN, int(size * 0.55))
+        user_size = max(14, int(size * 0.42))
+        name_font = get_font("medium", name_size)
+        user_font = get_font("regular", user_size)
 
-    # ── Avatar ────────────────────────────────────────────────────────────────
+        name_bbox = draw.textbbox((0, 0), "Ty", font=name_font)
+        name_h = name_bbox[3] - name_bbox[1]
+        user_bbox = draw.textbbox((0, 0), "Ty", font=user_font)
+        user_h = user_bbox[3] - user_bbox[1]
+
+        gap = int(size * 0.6)
+        total_h = calculate_text_height(lines, line_h, name_h, user_h, gap)
+
+        if total_h <= max_h:
+            return font, lines, line_h, size, name_font, user_font, name_h, user_h, gap, total_h
+
+    # Fallback nhỏ nhất
+    font = get_font("regular", FONT_MIN)
+    lines = smart_wrap(text, font, max_w, draw)
+    line_h = int(FONT_MIN * LINE_HEIGHT_RATIO)
+    name_font = get_font("medium", FONT_MIN)
+    user_font = get_font("regular", 14)
+    name_h = user_h = FONT_MIN
+    gap = int(FONT_MIN * 0.6)
+    total_h = calculate_text_height(lines, line_h, name_h, user_h, gap)
+
+    return font, lines, line_h, FONT_MIN, name_font, user_font, name_h, user_h, gap, total_h
+
+def fit_text_landscape(text: str, max_w: int, max_h: int, draw: ImageDraw.ImageDraw):
+    """Tìm font size phù hợp cho landscape (text bên phải)"""
+    for size in range(FONT_MAX, FONT_MIN - 1, -FONT_STEP):
+        font = get_font("regular", size)
+        lines = smart_wrap(text, font, max_w, draw)
+        line_h = int(size * LINE_HEIGHT_RATIO)
+
+        name_size = max(FONT_MIN, int(size * 0.58))
+        user_size = max(14, int(size * 0.44))
+        name_font = get_font("medium", name_size)
+        user_font = get_font("regular", user_size)
+
+        name_bbox = draw.textbbox((0, 0), "Ty", font=name_font)
+        name_h = name_bbox[3] - name_bbox[1]
+        user_bbox = draw.textbbox((0, 0), "Ty", font=user_font)
+        user_h = user_bbox[3] - user_bbox[1]
+
+        gap = int(size * 0.55)
+        total_h = calculate_text_height(lines, line_h, name_h, user_h, gap)
+
+        if total_h <= max_h:
+            return font, lines, line_h, size, name_font, user_font, name_h, user_h, gap
+
+    # Fallback
+    font = get_font("regular", FONT_MIN)
+    lines = smart_wrap(text, font, max_w, draw)
+    line_h = int(FONT_MIN * LINE_HEIGHT_RATIO)
+    name_font = get_font("medium", FONT_MIN)
+    user_font = get_font("regular", 14)
+    name_h = user_h = FONT_MIN
+    gap = int(FONT_MIN * 0.55)
+
+    return font, lines, line_h, FONT_MIN, name_font, user_font, name_h, user_h, gap
+
+def render_landscape(text: str, display_name: str, username: str, avatar_url: str):
+    """Render style landscape (hình 1)"""
+    canvas = Image.new("RGBA", (LANDSCAPE_W, LANDSCAPE_H), COLOR_BG)
+
+    # Avatar
     av = fetch_avatar(avatar_url)
     if av:
         aw, ah = av.size
-        # Scale fit chiều cao
-        scale  = IMG_H / ah
+        scale = LANDSCAPE_H / ah
         new_aw = int(aw * scale)
-        av = av.resize((new_aw, IMG_H), Image.LANCZOS)
+        av = av.resize((new_aw, LANDSCAPE_H), Image.LANCZOS)
 
-        # Crop về AVATAR_MAX_W
-        paste_w = min(new_aw, AVATAR_MAX_W)
-        av_crop = av.crop((0, 0, paste_w, IMG_H)).convert("RGBA")
+        paste_w = min(new_aw, LANDSCAPE_AVATAR_MAX_W)
+        av_crop = av.crop((0, 0, paste_w, LANDSCAPE_H)).convert("RGBA")
 
-        # Áp fade ngang thuần — mỗi cột X đều nhau từ trên xuống dưới
-        mask = make_horizontal_fade(paste_w, IMG_H, fade_start=0.65)
+        # Fade ngang
+        mask = make_horizontal_fade(paste_w, LANDSCAPE_H, 0.65)
         av_crop.putalpha(mask)
         canvas.paste(av_crop, (0, 0), av_crop)
 
-    # ── Text ──────────────────────────────────────────────────────────────────
-    font, lines, line_h, fs = fit_text(text, TEXT_W, int(IMG_H * 0.62))
+    # Text area
+    dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    text_max_h = int(LANDSCAPE_H * 0.75)
 
-    name_size = max(FONT_MIN, int(fs * 0.58))
-    user_size = max(14,       int(fs * 0.44))
-    name_font = find_font(FONT_ITALIC_PATHS, name_size)
-    user_font = find_font(FONT_PATHS,        user_size)
+    font, lines, line_h, fs, name_font, user_font, name_h, user_h, gap = fit_text_landscape(
+        text, LANDSCAPE_TEXT_W - 30, text_max_h, dummy
+    )
 
-    dummy     = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    name_text = f"- {display_name}"
-    user_text = f"@{username}"
-
-    nb     = dummy.textbbox((0, 0), name_text, font=name_font)
-    name_h = nb[3] - nb[1]
-    ub     = dummy.textbbox((0, 0), user_text, font=user_font)
-    user_h = ub[3] - ub[1]
-
-    gap      = int(fs * 0.55)
-    name_gap = int(name_size * 0.28)
-    total_h  = line_h * len(lines) + gap + name_h + name_gap + user_h
-    start_y  = (IMG_H - total_h) // 2
+    # Tính toán vị trí căn giữa
+    total_text_h = calculate_text_height(lines, line_h, name_h, user_h, gap)
+    start_y = (LANDSCAPE_H - total_text_h) // 2
 
     draw = ImageDraw.Draw(canvas)
-    y    = start_y
+    y = start_y
 
+    # Vẽ quote text
     for line in lines:
-        b  = dummy.textbbox((0, 0), line, font=font)
-        lw = b[2] - b[0]
-        x  = TEXT_X + TEXT_PAD + (TEXT_W - lw) // 2
+        bbox = dummy.textbbox((0, 0), line, font=font)
+        lw = bbox[2] - bbox[0]
+        x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - lw) // 2
         draw.text((x, y), line, font=font, fill=COLOR_TEXT)
         y += line_h
 
+    # Vẽ tên
     y += gap
-    nb2    = dummy.textbbox((0, 0), name_text, font=name_font)
-    name_w = nb2[2] - nb2[0]
-    draw.text((TEXT_X + TEXT_PAD + (TEXT_W - name_w) // 2, y),
-              name_text, font=name_font, fill=COLOR_NAME)
-    y += name_h + name_gap
+    name_text = f"— {display_name}"
+    bbox = dummy.textbbox((0, 0), name_text, font=name_font)
+    name_w = bbox[2] - bbox[0]
+    x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - name_w) // 2
+    draw.text((x, y), name_text, font=name_font, fill=COLOR_NAME)
+    y += name_h + (name_h // 3)
 
-    ub2    = dummy.textbbox((0, 0), user_text, font=user_font)
-    user_w = ub2[2] - ub2[0]
-    draw.text((TEXT_X + TEXT_PAD + (TEXT_W - user_w) // 2, y),
-              user_text, font=user_font, fill=COLOR_USERNAME)
+    # Vẽ username
+    user_text = f"@{username}"
+    bbox = dummy.textbbox((0, 0), user_text, font=user_font)
+    user_w = bbox[2] - bbox[0]
+    x = LANDSCAPE_TEXT_X + (LANDSCAPE_TEXT_W - user_w) // 2
+    draw.text((x, y), user_text, font=user_font, fill=COLOR_USERNAME)
 
-    out = canvas.convert("RGB")
+    return canvas.convert("RGB")
+
+def render_portrait(text: str, display_name: str, username: str, avatar_url: str):
+    """Render style portrait (hình 2) - dọc, avatar trên, text dưới"""
+    dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+
+    # Tính toán text trước để biết cần bao nhiêu chiều cao
+    text_max_w = PORTRAIT_W - 80  # Padding 40 mỗi bên
+    text_max_h = 400  # Dự trữ cho text
+
+    font, lines, line_h, fs, name_font, user_font, name_h, user_h, gap, text_h = fit_text_portrait(
+        text, text_max_w, text_max_h, dummy
+    )
+
+    # Tính chiều cao canvas cuối cùng
+    text_area_h = text_h + 60  # Padding
+    canvas_h = max(PORTRAIT_MIN_H, PORTRAIT_AVATAR_H + text_area_h)
+
+    canvas = Image.new("RGBA", (PORTRAIT_W, canvas_h), COLOR_BG)
+
+    # Avatar - full width, fit height
+    av = fetch_avatar(avatar_url)
+    if av:
+        aw, ah = av.size
+        # Scale để fit width
+        scale = PORTRAIT_W / aw
+        new_ah = int(ah * scale)
+        av = av.resize((PORTRAIT_W, new_ah), Image.LANCZOS)
+
+        # Crop hoặc pad để có chiều cao mong muốn
+        if new_ah >= PORTRAIT_AVATAR_H:
+            # Crop từ top
+            av_crop = av.crop((0, 0, PORTRAIT_W, PORTRAIT_AVATAR_H))
+        else:
+            # Pad thêm đen ở dưới
+            av_crop = Image.new("RGBA", (PORTRAIT_W, PORTRAIT_AVATAR_H), COLOR_BG)
+            av_crop.paste(av, (0, 0))
+
+        av_crop = av_crop.convert("RGBA")
+
+        # Fade dọc từ 55% xuống
+        mask = make_vertical_fade(PORTRAIT_W, PORTRAIT_AVATAR_H, 0.55)
+        av_crop.putalpha(mask)
+        canvas.paste(av_crop, (0, 0), av_crop)
+
+    # Text area - ở dưới cùng
+    draw = ImageDraw.Draw(canvas)
+
+    # Vùng text bắt đầu từ dưới lên
+    text_start_y = canvas_h - text_area_h + 30
+    y = text_start_y
+
+    # Căn giữa text
+    for line in lines:
+        bbox = dummy.textbbox((0, 0), line, font=font)
+        lw = bbox[2] - bbox[0]
+        x = (PORTRAIT_W - lw) // 2
+        draw.text((x, y), line, font=font, fill=COLOR_TEXT)
+        y += line_h
+
+    # Tên
+    y += gap
+    name_text = f"— {display_name}"
+    bbox = dummy.textbbox((0, 0), name_text, font=name_font)
+    name_w = bbox[2] - bbox[0]
+    x = (PORTRAIT_W - name_w) // 2
+    draw.text((x, y), name_text, font=name_font, fill=COLOR_NAME)
+    y += name_h + (name_h // 3)
+
+    # Username
+    user_text = f"@{username}"
+    bbox = dummy.textbbox((0, 0), user_text, font=user_font)
+    user_w = bbox[2] - bbox[0]
+    x = (PORTRAIT_W - user_w) // 2
+    draw.text((x, y), user_text, font=user_font, fill=COLOR_USERNAME)
+
+    return canvas.convert("RGB")
+
+def render_quote(text: str, display_name: str, username: str, avatar_url: str, style: str = "landscape"):
+    """Render quote theo style"""
+    if style == STYLE_PORTRAIT:
+        img = render_portrait(text, display_name, username, avatar_url)
+    else:
+        img = render_landscape(text, display_name, username, avatar_url)
+
     buf = io.BytesIO()
-    out.save(buf, format="PNG", optimize=True)
+    img.save(buf, format="PNG", optimize=True)
     buf.seek(0)
     return buf.read()
 
+# ═════════════════════════════════════════════════════════════════════════════
+# ROUTES
+# ═════════════════════════════════════════════════════════════════════════════
+
 @app.route("/", methods=["GET"])
 def index():
-    return "Quote Generator API is Running!", 200
+    return "Quote Generator API v5 is Running!", 200
+
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "4"})
+    return jsonify({"status": "ok", "version": "5", "styles": ["landscape", "portrait"]})
 
 @app.route("/quote", methods=["POST"])
 def quote():
     try:
-        data         = request.get_json(force=True, silent=True) or {}
-        text         = (data.get("text") or "").strip()
+        data = request.get_json(force=True, silent=True) or {}
+        text = (data.get("text") or "").strip()
         display_name = (data.get("display_name") or data.get("username") or "Unknown").strip()
-        username     = (data.get("username") or "unknown").strip()
-        avatar_url   = (data.get("avatar") or "").strip()
+        username = (data.get("username") or "unknown").strip()
+        avatar_url = (data.get("avatar") or "").strip()
+        style = (data.get("style") or "landscape").strip().lower()
 
         if not text:
             return jsonify({"error": "text is required"}), 400
         if len(text) > 500:
             return jsonify({"error": "text too long (max 500 chars)"}), 400
+        if style not in [STYLE_LANDSCAPE, STYLE_PORTRAIT]:
+            style = STYLE_LANDSCAPE
 
-        png_bytes = render_quote(text, display_name, username, avatar_url)
-        return send_file(io.BytesIO(png_bytes), mimetype="image/png",
-                         as_attachment=False, download_name="quote.png")
+        png_bytes = render_quote(text, display_name, username, avatar_url, style)
+        return send_file(
+            io.BytesIO(png_bytes),
+            mimetype="image/png",
+            as_attachment=False,
+            download_name=f"quote_{style}.png"
+        )
+
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
