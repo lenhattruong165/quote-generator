@@ -115,53 +115,91 @@ def get_segment_width(seg, font, emoji_size, draw):
     else:
         return emoji_size
 
+def split_text_to_tokens(text):
+    """Tách text thành list token: mỗi token là 1 từ hoặc 1 khoảng trắng."""
+    tokens = []
+    current = ""
+    for ch in text:
+        if ch == " ":
+            if current:
+                tokens.append(current)
+                current = ""
+            tokens.append(" ")
+        else:
+            current += ch
+    if current:
+        tokens.append(current)
+    return tokens
+
+def hard_cut_token(token, font, max_w, emoji_size, draw):
+    """Cắt token dài hơn max_w thành nhiều phần vừa vặn."""
+    parts = []
+    while token:
+        cut = 0
+        for i in range(1, len(token) + 1):
+            test_w = get_segment_width(("text", token[:i]), font, emoji_size, draw)
+            if test_w > max_w:
+                cut = i - 1
+                break
+            cut = i
+        if cut == 0:
+            cut = 1
+        parts.append(token[:cut])
+        token = token[cut:]
+    return parts
+
 def wrap_segments(segments, font, max_w, emoji_size, draw):
     lines = []
     current_line = []
     current_w = 0
-    for seg in segments:
-        seg_w = get_segment_width(seg, font, emoji_size, draw)
-        if seg_w > max_w:
-            if current_line:
-                lines.append(current_line)
-                current_line = []
-                current_w = 0
-            if seg[0] == "text":
-                text = seg[1]
-                while text:
-                    remaining = max_w - current_w if current_line else max_w
-                    if remaining <= 10:
-                        if current_line:
-                            lines.append(current_line)
-                        current_line = []
-                        current_w = 0
-                        remaining = max_w
-                    cut = 0
-                    for i in range(1, len(text) + 1):
-                        test_w = get_segment_width(("text", text[:i]), font, emoji_size, draw)
-                        if test_w > remaining:
-                            cut = i - 1
-                            break
-                        cut = i
-                    if cut == 0:
-                        cut = 1
-                    current_line.append(("text", text[:cut]))
-                    current_w += get_segment_width(("text", text[:cut]), font, emoji_size, draw)
-                    text = text[cut:]
-                    if current_w >= max_w * 0.95:
-                        lines.append(current_line)
-                        current_line = []
-                        current_w = 0
-            continue
-        if current_w + seg_w > max_w and current_line:
+
+    def flush_line():
+        nonlocal current_line, current_w
+        # Trim trailing space segment
+        while current_line and current_line[-1] == ("text", " "):
+            current_line.pop()
+        if current_line:
             lines.append(current_line)
-            current_line = [seg]
-            current_w = seg_w
+        current_line = []
+        current_w = 0
+
+    def add_segment(seg):
+        nonlocal current_w
+        current_line.append(seg)
+        current_w += get_segment_width(seg, font, emoji_size, draw)
+
+    for seg in segments:
+        if seg[0] == "text":
+            tokens = split_text_to_tokens(seg[1])
+            for token in tokens:
+                tok_w = get_segment_width(("text", token), font, emoji_size, draw)
+                if token == " ":
+                    # Chỉ thêm space nếu đang có nội dung trên dòng
+                    if current_line:
+                        add_segment(("text", " "))
+                elif tok_w > max_w:
+                    # Token quá dài → hard-cut
+                    parts = hard_cut_token(token, font, max_w, emoji_size, draw)
+                    for part in parts:
+                        part_w = get_segment_width(("text", part), font, emoji_size, draw)
+                        if current_w + part_w > max_w and current_line:
+                            flush_line()
+                        add_segment(("text", part))
+                        if current_w >= max_w * 0.95:
+                            flush_line()
+                else:
+                    # Token bình thường — wrap nếu không đủ chỗ
+                    if current_w + tok_w > max_w and current_line:
+                        flush_line()
+                    add_segment(("text", token))
         else:
-            current_line.append(seg)
-            current_w += seg_w
-    if current_line:
-        lines.append(current_line)
+            # Emoji segment
+            seg_w = get_segment_width(seg, font, emoji_size, draw)
+            if current_w + seg_w > max_w and current_line:
+                flush_line()
+            add_segment(seg)
+
+    flush_line()
     return lines
 
 def make_horizontal_fade(width: int, height: int, fade_start: float = 0.60):
