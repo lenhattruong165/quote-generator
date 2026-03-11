@@ -439,112 +439,171 @@ def render_portrait(text: str, display_name: str, username: str, avatar_url: str
     draw.text((x, y), user_text, font=text_info["user_font"], fill=COLOR_USERNAME)
     return canvas.convert("RGB")
 
+def _make_world_map_texture(width: int, height: int, alpha: int = 18) -> Image.Image:
+    """
+    Tạo texture bản đồ thế giới mờ bằng cách vẽ các đường lưới kinh/vĩ tuyến
+    và các hình elip giả lập lục địa — không cần file external.
+    """
+    tex = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    d   = ImageDraw.Draw(tex)
+    c   = (255, 255, 255, alpha)
+
+    # Lưới kinh tuyến dọc
+    for x in range(0, width, width // 12):
+        d.line([(x, 0), (x, height)], fill=c, width=1)
+    # Lưới vĩ tuyến ngang (dạng cong nhẹ)
+    for yi in range(0, height, height // 8):
+        pts = []
+        for xi in range(0, width + 1, 8):
+            curve = int(4 * (xi / width - 0.5) ** 2 * height * 0.04)
+            pts.append((xi, yi + curve))
+        if len(pts) >= 2:
+            d.line(pts, fill=c, width=1)
+
+    # Lục địa giả lập (elip mờ)
+    continents = [
+        (0.12, 0.25, 0.22, 0.55),   # Americas
+        (0.38, 0.15, 0.58, 0.60),   # Europe/Africa
+        (0.60, 0.15, 0.85, 0.55),   # Asia
+        (0.70, 0.58, 0.90, 0.80),   # Australia
+    ]
+    for (x0r, y0r, x1r, y1r) in continents:
+        box = [int(x0r*width), int(y0r*height), int(x1r*width), int(y1r*height)]
+        d.ellipse(box, outline=(255, 255, 255, alpha + 8), width=1)
+
+    return tex
+
+
 def render_news(text: str, username: str, avatar_url: str, server_name: str = None):
     """
-    Style NEWS:
-    - Phần trên: avatar full width + badge 'SOURCE: @username' góc trên trái
-    - Phần dưới: nền gradient xanh lá
-        · Hàng tag: badge [server_name] tự co giãn + date DD/MM/YYYY bên phải
-        · Text quote chữ trắng đậm
+    Style NEWS v2:
+    - Avatar full width + fade đáy mượt
+    - Badge SOURCE: @username góc trên trái (mờ)
+    - Nền gradient xanh lá + texture bản đồ thế giới mờ
+    - Badge server_name tự co giãn + date bên phải
+    - Text quote lớn, trắng, căn trái
     """
-    import unicodedata
     from datetime import datetime
 
-    dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    dummy    = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    TEXT_PAD = 44
 
-    # Fonts
-    badge_font   = get_font("regular", 22)
-    source_font  = get_font("regular", 20)
-    date_font    = get_font("regular", 22)
-    text_font_sz = 40
-    text_font    = get_font("regular", text_font_sz)
+    # ── Fonts ──
+    source_font = get_font("regular", 19)
+    badge_font  = get_font("regular", 26)
+    date_font   = get_font("regular", 24)
 
-    # Text segments + wrap
-    TEXT_PAD   = 48
+    # ── Fit text size (lớn hơn, max 56) ──
     text_max_w = NEWS_W - TEXT_PAD * 2
     segments   = parse_text_with_emoji(text)
-    line_h     = int(text_font_sz * 1.45)
-
-    # Fit text size
-    fitted = None
-    for sz in range(48, 22, -2):
+    fitted     = None
+    for sz in range(56, 26, -2):
         f   = get_font("regular", sz)
-        lh  = int(sz * 1.45)
+        lh  = int(sz * 1.50)
         lns = wrap_segments(segments, f, text_max_w, int(sz * 1.2), dummy)
-        if len(lns) * lh <= 260:
+        if len(lns) * lh <= 300:
             fitted = (f, sz, lh, lns)
             break
     if not fitted:
-        f   = get_font("regular", 24)
-        lns = wrap_segments(segments, f, text_max_w, 28, dummy)
-        fitted = (f, 24, int(24 * 1.45), lns)
+        f   = get_font("regular", 28)
+        lns = wrap_segments(segments, f, text_max_w, 34, dummy)
+        fitted = (f, 28, int(28 * 1.50), lns)
     text_font, text_font_sz, line_h, text_lines = fitted
     emoji_size = int(text_font_sz * 1.2)
 
-    # Tính chiều cao phần text dưới
-    BOTTOM_PAD_TOP    = 28   # padding trên (trước badge)
-    BADGE_ROW_H       = 48   # chiều cao hàng badge+date
-    GAP_BADGE_TEXT    = 20
-    TEXT_BOTTOM_PAD   = 36
-    text_block_h      = len(text_lines) * line_h
-    bottom_h          = BOTTOM_PAD_TOP + BADGE_ROW_H + GAP_BADGE_TEXT + text_block_h + TEXT_BOTTOM_PAD
+    # ── Chiều cao layout ──
+    BOTTOM_PAD_TOP  = 32
+    GAP_BADGE_TEXT  = 22
+    TEXT_BOTTOM_PAD = 44
+    BADGE_H         = 44   # chiều cao cố định hàng badge
 
-    # Tổng canvas
-    avatar_h  = int(NEWS_W * NEWS_AVATAR_RATIO)
-    canvas_h  = avatar_h + bottom_h
-    canvas    = Image.new("RGB", (NEWS_W, canvas_h), (0, 0, 0))
+    text_block_h = len(text_lines) * line_h
+    bottom_h     = BOTTOM_PAD_TOP + BADGE_H + GAP_BADGE_TEXT + text_block_h + TEXT_BOTTOM_PAD
 
-    # ── Phần trên: avatar ──
+    # ── Canvas ──
+    avatar_h = int(NEWS_W * 0.62)   # 62% chiều cao tổng cho avatar
+    canvas_h = avatar_h + bottom_h
+    canvas   = Image.new("RGB", (NEWS_W, canvas_h), (10, 10, 10))
+
+    # ── Avatar + fade đáy ──
     av = fetch_avatar(avatar_url)
     if av:
         aw, ah = av.size
+        # Scale để fill full width, center crop theo chiều cao
         scale  = NEWS_W / aw
         new_ah = int(ah * scale)
         av     = av.resize((NEWS_W, new_ah), Image.LANCZOS)
         if new_ah >= avatar_h:
-            av_crop = av.crop((0, 0, NEWS_W, avatar_h)).convert("RGBA")
+            # Center crop dọc
+            top    = (new_ah - avatar_h) // 3   # lấy phần trên nhiều hơn
+            av_crop = av.crop((0, top, NEWS_W, top + avatar_h)).convert("RGBA")
         else:
             av_crop = Image.new("RGBA", (NEWS_W, avatar_h), (30, 30, 30, 255))
             av_crop.paste(av.convert("RGBA"), (0, 0))
 
-        # Badge 'SOURCE: @username' góc trên trái
+        # Fade đáy avatar → hoà vào nền xanh
+        fade_mask = Image.new("L", (NEWS_W, avatar_h), 255)
+        fd        = ImageDraw.Draw(fade_mask)
+        fade_start = int(avatar_h * 0.65)
+        for fy in range(fade_start, avatar_h):
+            p     = (fy - fade_start) / max(1, avatar_h - fade_start)
+            alpha = int(255 * (1.0 - p) ** 1.8)
+            fd.line([(0, fy), (NEWS_W, fy)], fill=alpha)
+        av_crop.putalpha(fade_mask)
+
+        # SOURCE badge góc trên trái — vẽ TRƯỚC putalpha đã xong rồi nên vẽ trực tiếp lên canvas sau
+        canvas.paste(av_crop.convert("RGB"), (0, 0), av_crop)
+
+        # Vẽ SOURCE badge lên canvas (không bị ảnh hưởng fade)
         source_text = f"SOURCE: @{username}"
-        sb = dummy.textbbox((0, 0), source_text, font=source_font)
+        sb  = dummy.textbbox((0, 0), source_text, font=source_font)
         s_w = sb[2] - sb[0]
         s_h = sb[3] - sb[1]
-        badge_bg = Image.new("RGBA", (s_w + 24, s_h + 14), (0, 0, 0, 160))
-        av_draw  = ImageDraw.Draw(av_crop)
-        av_crop.paste(badge_bg, (16, 16), badge_bg)
-        av_draw.text((16 + 12, 16 + 7), source_text, font=source_font, fill=(220, 220, 220, 255))
+        src_bg = Image.new("RGBA", (s_w + 20, s_h + 12), (0, 0, 0, 150))
+        canvas_rgba = canvas.convert("RGBA")
+        canvas_rgba.paste(src_bg, (16, 16), src_bg)
+        src_draw = ImageDraw.Draw(canvas_rgba)
+        src_draw.text((16 + 10, 16 + 6), source_text, font=source_font, fill=(210, 210, 210, 255))
+        canvas = canvas_rgba.convert("RGB")
+    else:
+        # Không có avatar — vẽ SOURCE badge trực tiếp
+        draw_tmp = ImageDraw.Draw(canvas)
+        source_text = f"SOURCE: @{username}"
+        draw_tmp.text((26, 22), source_text, font=source_font, fill=(180, 180, 180))
 
-        canvas.paste(av_crop.convert("RGB"), (0, 0))
-
-    # ── Phần dưới: gradient xanh ──
-    grad = Image.new("RGB", (NEWS_W, bottom_h))
+    # ── Nền gradient xanh + texture bản đồ ──
+    grad = Image.new("RGBA", (NEWS_W, bottom_h), (0, 0, 0, 0))
+    gd   = ImageDraw.Draw(grad)
     for gy in range(bottom_h):
-        t   = gy / max(1, bottom_h - 1)
-        r   = int(NEWS_BG_TOP[0] + (NEWS_BG_BOTTOM[0] - NEWS_BG_TOP[0]) * t)
-        g   = int(NEWS_BG_TOP[1] + (NEWS_BG_BOTTOM[1] - NEWS_BG_TOP[1]) * t)
-        b   = int(NEWS_BG_TOP[2] + (NEWS_BG_BOTTOM[2] - NEWS_BG_TOP[2]) * t)
-        for gx in range(NEWS_W):
-            grad.putpixel((gx, gy), (r, g, b))
-    canvas.paste(grad, (0, avatar_h))
+        t = gy / max(1, bottom_h - 1)
+        r = int(NEWS_BG_TOP[0] + (NEWS_BG_BOTTOM[0] - NEWS_BG_TOP[0]) * t)
+        g = int(NEWS_BG_TOP[1] + (NEWS_BG_BOTTOM[1] - NEWS_BG_TOP[1]) * t)
+        b = int(NEWS_BG_TOP[2] + (NEWS_BG_BOTTOM[2] - NEWS_BG_TOP[2]) * t)
+        gd.line([(0, gy), (NEWS_W, gy)], fill=(r, g, b, 255))
+
+    # Texture bản đồ mờ đè lên gradient
+    world_tex = _make_world_map_texture(NEWS_W, bottom_h, alpha=20)
+    grad.paste(world_tex, (0, 0), world_tex)
+
+    canvas_rgba2 = canvas.convert("RGBA")
+    canvas_rgba2.paste(grad, (0, avatar_h), grad)
+    canvas = canvas_rgba2.convert("RGB")
 
     draw = ImageDraw.Draw(canvas)
     y    = avatar_h + BOTTOM_PAD_TOP
 
-    # ── Badge server_name (tự co giãn) ──
-    badge_text = (server_name or "NEWS").upper()
-    bb   = dummy.textbbox((0, 0), badge_text, font=badge_font)
-    bw   = bb[2] - bb[0]
-    bh   = bb[3] - bb[1]
+    # ── Badge server_name tự co giãn ──
+    badge_text    = (server_name or "NEWS").upper()
+    bb            = dummy.textbbox((0, 0), badge_text, font=badge_font)
+    bw            = bb[2] - bb[0]
+    bh            = bb[3] - bb[1]
     badge_total_w = bw + NEWS_BADGE_PAD_X * 2
     badge_total_h = bh + NEWS_BADGE_PAD_Y * 2
-    # Vẽ nền badge (bo góc 6px bằng cách vẽ rectangle)
-    badge_x, badge_y = TEXT_PAD, y
+    badge_x       = TEXT_PAD
+    badge_y       = y + (BADGE_H - badge_total_h) // 2
     draw.rounded_rectangle(
         [badge_x, badge_y, badge_x + badge_total_w, badge_y + badge_total_h],
-        radius=6, fill=NEWS_BADGE_BG
+        radius=7, fill=NEWS_BADGE_BG
     )
     draw.text(
         (badge_x + NEWS_BADGE_PAD_X, badge_y + NEWS_BADGE_PAD_Y),
@@ -556,14 +615,13 @@ def render_news(text: str, username: str, avatar_url: str, server_name: str = No
     db   = dummy.textbbox((0, 0), date_str, font=date_font)
     d_w  = db[2] - db[0]
     d_h  = db[3] - db[1]
-    date_y = badge_y + (badge_total_h - d_h) // 2
-    draw.text((NEWS_W - TEXT_PAD - d_w, date_y), date_str, font=date_font, fill=(210, 255, 210))
+    date_y = y + (BADGE_H - d_h) // 2
+    draw.text((NEWS_W - TEXT_PAD - d_w, date_y), date_str, font=date_font, fill=(200, 245, 200))
 
-    y += badge_total_h + GAP_BADGE_TEXT
+    y += BADGE_H + GAP_BADGE_TEXT
 
     # ── Text quote ──
     for line in text_lines:
-        lw = get_line_width(line, text_font, emoji_size, dummy)
         render_line(canvas, line, TEXT_PAD, y, text_font, emoji_size, (255, 255, 255))
         y += line_h
 
