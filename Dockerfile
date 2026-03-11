@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Cài fontconfig trước (cung cấp fc-cache), sau đó fonts + curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fontconfig \
     fonts-noto \
@@ -19,8 +18,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY fonts/ ./fonts/
 
-# HF Space chạy port 7860
-EXPOSE 7860
+EXPOSE 10000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:7860", "--workers", "2", "--timeout", "60", "app:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-10000} --workers 1 --timeout 120 app:app"]
