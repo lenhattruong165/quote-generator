@@ -36,9 +36,9 @@ COLOR_USERNAME = (140, 140, 140, 255)
 COLOR_LINE = (100, 100, 100, 255)
 COLOR_SERVER = (120, 120, 120, 255)
 
-# Font paths — upload gg_sans_Regular.ttf vào HF Space Files tab tại fonts/gg_sans_Regular.ttf
-FONT_PATH_REGULAR = os.path.join(os.path.dirname(__file__), "fonts", "gg_sans_Regular.ttf")
-FONT_FALLBACK     = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+# Font path — upload MPLUSRounded1c-Light.ttf vào HF Space Files tab tại fonts/MPLUSRounded1c-Light.ttf
+FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "MPLUSRounded1c-Light.ttf")
+FONT_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 _font_cache = {}
 _emoji_cache = {}
@@ -48,7 +48,7 @@ def get_font(style="regular", size=32):
     if key in _font_cache:
         return _font_cache[key]
     try:
-        font = ImageFont.truetype(FONT_PATH_REGULAR, size)
+        font = ImageFont.truetype(FONT_PATH, size)
         _font_cache[key] = font
         return font
     except Exception as e:
@@ -113,50 +113,77 @@ def get_segment_width(seg, font, emoji_size, draw):
         return emoji_size
 
 def wrap_segments(segments, font, max_w, emoji_size, draw):
+    """
+    Wrap segments into lines respecting max_w.
+    Text segments split on word (space) boundaries first to avoid cutting
+    in the middle of Vietnamese words (e.g. 'tình' → 'tì'+'nh').
+    Falls back to character-level cut only when a single word > max_w.
+    """
+    import unicodedata
+
+    # Expand all text segments into word-level tokens
+    tokens = []
+    for seg in segments:
+        if seg[0] != "text":
+            tokens.append(seg)
+            continue
+        words = seg[1].split(" ")
+        for i, word in enumerate(words):
+            if not word:
+                continue
+            # Prepend space between words (except very first token overall)
+            text = (" " + word) if tokens else word
+            tokens.append(("text", text))
+
     lines = []
     current_line = []
     current_w = 0
-    for seg in segments:
-        seg_w = get_segment_width(seg, font, emoji_size, draw)
-        if seg_w > max_w:
+
+    for tok in tokens:
+        tok_text = unicodedata.normalize("NFC", tok[1]) if tok[0] == "text" else tok[1]
+        tok = (tok[0], tok_text) if tok[0] == "text" else tok
+        tok_w = get_segment_width(tok, font, emoji_size, draw)
+
+        # Single word wider than max_w → character-level hard cut
+        if tok[0] == "text" and tok_w > max_w:
             if current_line:
                 lines.append(current_line)
                 current_line = []
                 current_w = 0
-            if seg[0] == "text":
-                text = seg[1]
-                while text:
-                    remaining = max_w - current_w if current_line else max_w
-                    if remaining <= 10:
-                        if current_line:
-                            lines.append(current_line)
-                        current_line = []
-                        current_w = 0
-                        remaining = max_w
-                    cut = 0
-                    for i in range(1, len(text) + 1):
-                        test_w = get_segment_width(("text", text[:i]), font, emoji_size, draw)
-                        if test_w > remaining:
-                            cut = i - 1
-                            break
-                        cut = i
-                    if cut == 0:
-                        cut = 1
-                    current_line.append(("text", text[:cut]))
-                    current_w += get_segment_width(("text", text[:cut]), font, emoji_size, draw)
-                    text = text[cut:]
-                    if current_w >= max_w * 0.95:
-                        lines.append(current_line)
-                        current_line = []
-                        current_w = 0
+            text = tok[1].lstrip(" ")
+            while text:
+                remaining = max_w
+                cut = 0
+                for i in range(1, len(text) + 1):
+                    w = get_segment_width(("text", text[:i]), font, emoji_size, draw)
+                    if w > remaining:
+                        cut = i - 1
+                        break
+                    cut = i
+                if cut == 0:
+                    cut = 1
+                current_line.append(("text", text[:cut]))
+                current_w = get_segment_width(("text", text[:cut]), font, emoji_size, draw)
+                text = text[cut:]
+                if text:
+                    lines.append(current_line)
+                    current_line = []
+                    current_w = 0
             continue
-        if current_w + seg_w > max_w and current_line:
+
+        # Normal word: check if it fits on current line
+        if current_w + tok_w > max_w and current_line:
             lines.append(current_line)
-            current_line = [seg]
-            current_w = seg_w
+            # Strip leading space when starting new line
+            stripped = tok[1].lstrip(" ")
+            tok = ("text", stripped)
+            tok_w = get_segment_width(tok, font, emoji_size, draw)
+            current_line = [tok]
+            current_w = tok_w
         else:
-            current_line.append(seg)
-            current_w += seg_w
+            current_line.append(tok)
+            current_w += tok_w
+
     if current_line:
         lines.append(current_line)
     return lines
