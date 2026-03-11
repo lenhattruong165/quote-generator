@@ -1,4 +1,4 @@
-"""Quote Image Generator API v9 - Chang'e Aspirant Bot"""
+"""Quote Image Generator API v10 - Chang'e Aspirant Bot"""
 import io
 import os
 import re
@@ -10,6 +10,16 @@ app = Flask(__name__)
 
 STYLE_LANDSCAPE = "landscape"
 STYLE_PORTRAIT = "portrait"
+STYLE_NEWS = "news"
+
+# News style config
+NEWS_W           = 720
+NEWS_AVATAR_RATIO = 0.58   # phần ảnh chiếm 58% chiều cao tổng
+NEWS_BG_TOP      = (20,  90,  50)   # xanh đậm
+NEWS_BG_BOTTOM   = (35, 140,  70)   # xanh nhạt hơn
+NEWS_BADGE_BG    = (15,  65,  35)   # badge đậm hơn nền
+NEWS_BADGE_PAD_X = 18
+NEWS_BADGE_PAD_Y = 10
 
 # Landscape config
 LANDSCAPE_W = 1200
@@ -429,8 +439,141 @@ def render_portrait(text: str, display_name: str, username: str, avatar_url: str
     draw.text((x, y), user_text, font=text_info["user_font"], fill=COLOR_USERNAME)
     return canvas.convert("RGB")
 
+def render_news(text: str, username: str, avatar_url: str, server_name: str = None):
+    """
+    Style NEWS:
+    - Phần trên: avatar full width + badge 'SOURCE: @username' góc trên trái
+    - Phần dưới: nền gradient xanh lá
+        · Hàng tag: badge [server_name] tự co giãn + date DD/MM/YYYY bên phải
+        · Text quote chữ trắng đậm
+    """
+    import unicodedata
+    from datetime import datetime
+
+    dummy = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+
+    # Fonts
+    badge_font   = get_font("regular", 22)
+    source_font  = get_font("regular", 20)
+    date_font    = get_font("regular", 22)
+    text_font_sz = 40
+    text_font    = get_font("regular", text_font_sz)
+
+    # Text segments + wrap
+    TEXT_PAD   = 48
+    text_max_w = NEWS_W - TEXT_PAD * 2
+    segments   = parse_text_with_emoji(text)
+    line_h     = int(text_font_sz * 1.45)
+
+    # Fit text size
+    fitted = None
+    for sz in range(48, 22, -2):
+        f   = get_font("regular", sz)
+        lh  = int(sz * 1.45)
+        lns = wrap_segments(segments, f, text_max_w, int(sz * 1.2), dummy)
+        if len(lns) * lh <= 260:
+            fitted = (f, sz, lh, lns)
+            break
+    if not fitted:
+        f   = get_font("regular", 24)
+        lns = wrap_segments(segments, f, text_max_w, 28, dummy)
+        fitted = (f, 24, int(24 * 1.45), lns)
+    text_font, text_font_sz, line_h, text_lines = fitted
+    emoji_size = int(text_font_sz * 1.2)
+
+    # Tính chiều cao phần text dưới
+    BOTTOM_PAD_TOP    = 28   # padding trên (trước badge)
+    BADGE_ROW_H       = 48   # chiều cao hàng badge+date
+    GAP_BADGE_TEXT    = 20
+    TEXT_BOTTOM_PAD   = 36
+    text_block_h      = len(text_lines) * line_h
+    bottom_h          = BOTTOM_PAD_TOP + BADGE_ROW_H + GAP_BADGE_TEXT + text_block_h + TEXT_BOTTOM_PAD
+
+    # Tổng canvas
+    avatar_h  = int(NEWS_W * NEWS_AVATAR_RATIO)
+    canvas_h  = avatar_h + bottom_h
+    canvas    = Image.new("RGB", (NEWS_W, canvas_h), (0, 0, 0))
+
+    # ── Phần trên: avatar ──
+    av = fetch_avatar(avatar_url)
+    if av:
+        aw, ah = av.size
+        scale  = NEWS_W / aw
+        new_ah = int(ah * scale)
+        av     = av.resize((NEWS_W, new_ah), Image.LANCZOS)
+        if new_ah >= avatar_h:
+            av_crop = av.crop((0, 0, NEWS_W, avatar_h)).convert("RGBA")
+        else:
+            av_crop = Image.new("RGBA", (NEWS_W, avatar_h), (30, 30, 30, 255))
+            av_crop.paste(av.convert("RGBA"), (0, 0))
+
+        # Badge 'SOURCE: @username' góc trên trái
+        source_text = f"SOURCE: @{username}"
+        sb = dummy.textbbox((0, 0), source_text, font=source_font)
+        s_w = sb[2] - sb[0]
+        s_h = sb[3] - sb[1]
+        badge_bg = Image.new("RGBA", (s_w + 24, s_h + 14), (0, 0, 0, 160))
+        av_draw  = ImageDraw.Draw(av_crop)
+        av_crop.paste(badge_bg, (16, 16), badge_bg)
+        av_draw.text((16 + 12, 16 + 7), source_text, font=source_font, fill=(220, 220, 220, 255))
+
+        canvas.paste(av_crop.convert("RGB"), (0, 0))
+
+    # ── Phần dưới: gradient xanh ──
+    grad = Image.new("RGB", (NEWS_W, bottom_h))
+    for gy in range(bottom_h):
+        t   = gy / max(1, bottom_h - 1)
+        r   = int(NEWS_BG_TOP[0] + (NEWS_BG_BOTTOM[0] - NEWS_BG_TOP[0]) * t)
+        g   = int(NEWS_BG_TOP[1] + (NEWS_BG_BOTTOM[1] - NEWS_BG_TOP[1]) * t)
+        b   = int(NEWS_BG_TOP[2] + (NEWS_BG_BOTTOM[2] - NEWS_BG_TOP[2]) * t)
+        for gx in range(NEWS_W):
+            grad.putpixel((gx, gy), (r, g, b))
+    canvas.paste(grad, (0, avatar_h))
+
+    draw = ImageDraw.Draw(canvas)
+    y    = avatar_h + BOTTOM_PAD_TOP
+
+    # ── Badge server_name (tự co giãn) ──
+    badge_text = (server_name or "NEWS").upper()
+    bb   = dummy.textbbox((0, 0), badge_text, font=badge_font)
+    bw   = bb[2] - bb[0]
+    bh   = bb[3] - bb[1]
+    badge_total_w = bw + NEWS_BADGE_PAD_X * 2
+    badge_total_h = bh + NEWS_BADGE_PAD_Y * 2
+    # Vẽ nền badge (bo góc 6px bằng cách vẽ rectangle)
+    badge_x, badge_y = TEXT_PAD, y
+    draw.rounded_rectangle(
+        [badge_x, badge_y, badge_x + badge_total_w, badge_y + badge_total_h],
+        radius=6, fill=NEWS_BADGE_BG
+    )
+    draw.text(
+        (badge_x + NEWS_BADGE_PAD_X, badge_y + NEWS_BADGE_PAD_Y),
+        badge_text, font=badge_font, fill=(255, 255, 255)
+    )
+
+    # ── Date bên phải cùng hàng badge ──
+    date_str = datetime.now().strftime("%d/%m/%Y")
+    db   = dummy.textbbox((0, 0), date_str, font=date_font)
+    d_w  = db[2] - db[0]
+    d_h  = db[3] - db[1]
+    date_y = badge_y + (badge_total_h - d_h) // 2
+    draw.text((NEWS_W - TEXT_PAD - d_w, date_y), date_str, font=date_font, fill=(210, 255, 210))
+
+    y += badge_total_h + GAP_BADGE_TEXT
+
+    # ── Text quote ──
+    for line in text_lines:
+        lw = get_line_width(line, text_font, emoji_size, dummy)
+        render_line(canvas, line, TEXT_PAD, y, text_font, emoji_size, (255, 255, 255))
+        y += line_h
+
+    return canvas
+
+
 def render_quote(text: str, display_name: str, username: str, avatar_url: str, style: str = "landscape", server_name: str = None):
-    if style == STYLE_PORTRAIT:
+    if style == STYLE_NEWS:
+        img = render_news(text, username, avatar_url, server_name)
+    elif style == STYLE_PORTRAIT:
         img = render_portrait(text, display_name, username, avatar_url, server_name)
     else:
         img = render_landscape(text, display_name, username, avatar_url, server_name)
@@ -447,8 +590,8 @@ def index():
 def health():
     return jsonify({
         "status": "ok",
-        "version": "9",
-        "styles": ["landscape", "portrait"],
+        "version": "10",
+        "styles": ["landscape", "portrait", "news"],
         "features": ["emoji", "server-name", "black-bg-from-line"]
     })
 
@@ -466,7 +609,7 @@ def quote():
             return jsonify({"error": "text is required"}), 400
         if len(text) > 500:
             return jsonify({"error": "text too long (max 500 chars)"}), 400
-        if style not in [STYLE_LANDSCAPE, STYLE_PORTRAIT]:
+        if style not in [STYLE_LANDSCAPE, STYLE_PORTRAIT, STYLE_NEWS]:
             style = STYLE_LANDSCAPE
         png_bytes = render_quote(text, display_name, username, avatar_url, style, server_name)
         return send_file(
